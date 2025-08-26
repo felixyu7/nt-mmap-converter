@@ -97,11 +97,11 @@ def find_parquet_files(input_path: str) -> list:
         raise ValueError(f"Input path is not a directory: {input_path}")
     
     # Find all chunk files
-    pattern = os.path.join(input_path, "chunk_*.parquet")
+    pattern = os.path.join(input_path, "*.parquet")
     files = glob.glob(pattern)
     
     if not files:
-        raise ValueError(f"No chunk_*.parquet files found in {input_path}")
+        raise ValueError(f"No .parquet files found in {input_path}")
     
     # Sort by chunk number
     def get_chunk_number(filepath):
