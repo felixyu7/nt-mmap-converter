@@ -4,7 +4,7 @@ Utilities for validation and dataset statistics.
 
 import numpy as np
 import os
-from typing import Dict, Any, Tuple
+from typing import Dict, Any
 from .mmap_format import load_ntmmap
 
 def get_dataset_stats(input_path: str) -> Dict[str, Any]:
@@ -25,7 +25,7 @@ def get_dataset_stats(input_path: str) -> Dict[str, Any]:
     
     # Event statistics
     num_events = len(index_mmap)
-    photon_counts = index_mmap['photon_count']
+    photon_counts = index_mmap['photon_end_idx'] - index_mmap['photon_start_idx']
     
     # Energy statistics
     energies = index_mmap['initial_energy']
@@ -73,5 +73,4 @@ def print_dataset_info(input_path: str):
     print(f"\nInitial energy (GeV):")
     print(f"  - Range: {stats['energy_stats']['min_gev']:.2e} to {stats['energy_stats']['max_gev']:.2e}")
     print(f"  - Mean: {stats['energy_stats']['mean_gev']:.2e} ± {stats['energy_stats']['std_gev']:.2e}")
-
 
