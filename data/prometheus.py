@@ -345,15 +345,15 @@ def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any]
             yield mc_truth, photons_raw
 
 
-def convert_prometheus_to_mmap(input_path: str, output_path: str, 
-                              max_files: int = None, grouping_window_ns: float = 0.0) -> Tuple[int, int]:
+def convert_prometheus_to_mmap(input_path: str, output_path: str,
+                              file_range: str = None, grouping_window_ns: float = 0.0) -> Tuple[int, int]:
     """
     Convert Prometheus parquet files to memory-mapped format.
     
     Args:
         input_path: Directory containing chunk_*.parquet files
         output_path: Output path for memory-mapped files (without extension)
-        max_files: Maximum number of files to convert (None for all)
+        file_range: Range of files to convert, e.g., '0-100' or '100-115'
         
     Returns:
         Tuple of (num_events_converted, total_photons)
@@ -364,9 +364,13 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     print(f"Found {len(parquet_files)} parquet files")
     
     # Limit files if specified
-    if max_files is not None:
-        parquet_files = parquet_files[:max_files]
-        print(f"Processing first {len(parquet_files)} files")
+    if file_range:
+        try:
+            start, end = map(int, file_range.split('-'))
+            parquet_files = parquet_files[start:end]
+            print(f"Processing files from index {start} to {end}")
+        except ValueError:
+            print(f"Invalid file range format: {file_range}. Processing all files.")
     
     # Count total events in selected files
     total_events = count_total_events(parquet_files)

@@ -43,10 +43,10 @@ def main():
     )
     
     parser.add_argument(
-        "--max-files",
-        type=int,
+        "--file-range",
+        type=str,
         default=None,
-        help="Maximum number of files to convert (None for all)"
+        help="Range of files to convert, e.g., '0-100' or '100-115'"
     )
     
     
@@ -69,6 +69,13 @@ def main():
         help="Time window for grouping hits by sensor in nanoseconds (0 = no grouping, use raw hits)"
     )
     
+    parser.add_argument(
+        "--pulse-key",
+        type=str,
+        default="SplitInIceDSTPulses",
+        help="Name of the pulse series to extract from i3 files"
+    )
+    
     args = parser.parse_args()
     
     # Validate input path
@@ -85,8 +92,8 @@ def main():
     print(f"Source: {args.source}")
     print(f"Input: {args.input}")
     print(f"Output: {args.output}")
-    if args.max_files:
-        print(f"Max files: {args.max_files}")
+    if args.file_range:
+        print(f"File range: {args.file_range}")
     print()
     
     # Start conversion
@@ -95,11 +102,11 @@ def main():
     try:
         if args.source == "prometheus":
             num_events, total_photons = convert_prometheus_to_mmap(
-                args.input, args.output, args.max_files, args.grouping_window_ns
+                args.input, args.output, args.file_range, args.grouping_window_ns
             )
         elif args.source == "icecube":
             num_events, total_photons = convert_icecube_to_mmap(
-                args.input, args.output, args.max_files  
+                args.input, args.output, args.file_range, args.pulse_key
             )
         else:
             print(f"Error: Unsupported source format: {args.source}")
