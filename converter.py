@@ -14,7 +14,14 @@ from pathlib import Path
 
 from core.utils import print_dataset_info
 from data.prometheus import convert_prometheus_to_mmap
-from data.icecube import convert_icecube_to_mmap
+
+# Conditional import for IceCube functionality
+try:
+    from data.icecube import convert_icecube_to_mmap
+    ICECUBE_AVAILABLE = True
+except ImportError:
+    ICECUBE_AVAILABLE = False
+    convert_icecube_to_mmap = None
 
 
 def main():
@@ -23,11 +30,16 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
+    # Determine available source choices based on dependencies
+    available_sources = ["prometheus"]
+    if ICECUBE_AVAILABLE:
+        available_sources.append("icecube")
+    
     parser.add_argument(
         "--source", 
-        choices=["prometheus", "icecube"], 
+        choices=available_sources, 
         required=True,
-        help="Source data format"
+        help=f"Source data format. Available: {', '.join(available_sources)}"
     )
     
     parser.add_argument(
@@ -105,6 +117,10 @@ def main():
                 args.input, args.output, args.file_range, args.grouping_window_ns
             )
         elif args.source == "icecube":
+            if not ICECUBE_AVAILABLE:
+                print("Error: IceCube functionality requires the IceCube software framework.")
+                print("Please install IceCube software or use --source prometheus instead.")
+                sys.exit(1)
             num_events, total_photons = convert_icecube_to_mmap(
                 args.input, args.output, args.file_range, args.pulse_key
             )

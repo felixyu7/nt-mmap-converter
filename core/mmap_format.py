@@ -121,7 +121,10 @@ class PhotonHit:
 
 def create_mmap_files_with_headers(output_path: str, num_events: int) -> Tuple[str, str]:
     """
-    Create memory-mapped files with dtype headers for writing.
+    Create memory-mapped files with dtype headers for writing (fixed allocation).
+    
+    Use this function when the exact number of events is known upfront (e.g., filtering).
+    For data conversion, prefer create_streaming_mmap_files() for better performance.
     
     Args:
         output_path: Base path for output files (without extension)
@@ -158,6 +161,44 @@ def create_mmap_files_with_headers(output_path: str, num_events: int) -> Tuple[s
     return idx_path, dat_path
 
 
+def create_streaming_mmap_files(output_path: str, initial_events_estimate: int = 10000) -> Tuple[str, str]:
+    """
+    Create memory-mapped files for streaming/dynamic allocation.
+    
+    Args:
+        output_path: Base path for output files (without extension)
+        initial_events_estimate: Initial size estimate for the index file
+        
+    Returns:
+        Tuple of (idx_path, dat_path) for streaming writes
+    """
+    import pickle
+    import struct
+    
+    idx_path = f"{output_path}.idx"
+    dat_path = f"{output_path}.dat"
+    
+    # Create index file with header and initial allocation
+    with open(idx_path, 'wb') as f:
+        # Write event dtype header
+        dtype_bytes = pickle.dumps(EVENT_RECORD_DTYPE)
+        f.write(struct.pack('<I', len(dtype_bytes)))  # Size of dtype
+        f.write(dtype_bytes)                         # Dtype definition
+        
+        # Write initial placeholder data
+        placeholder = np.zeros(initial_events_estimate, dtype=EVENT_RECORD_DTYPE)
+        f.write(placeholder.tobytes())
+    
+    # Create data file with header only
+    with open(dat_path, 'wb') as f:
+        # Write photon dtype header  
+        dtype_bytes = pickle.dumps(PHOTON_HIT_DTYPE)
+        f.write(struct.pack('<I', len(dtype_bytes)))
+        f.write(dtype_bytes)
+    
+    return idx_path, dat_path
+
+
 def create_index_mmap_with_header(idx_path: str, num_events: int) -> np.memmap:
     """Create memory-mapped index file, skipping the dtype header."""
     import pickle
@@ -171,6 +212,97 @@ def create_index_mmap_with_header(idx_path: str, num_events: int) -> np.memmap:
     # Create memory map starting after header
     return np.memmap(idx_path, dtype=EVENT_RECORD_DTYPE, mode='r+', 
                     offset=header_size, shape=(num_events,))
+
+
+class StreamingIndexWriter:
+    """
+    Writer for dynamically growing index files.
+    """
+    
+    def __init__(self, idx_path: str, initial_capacity: int = 10000, growth_factor: float = 1.5):
+        """
+        Initialize streaming index writer.
+        
+        Args:
+            idx_path: Path to the index file
+            initial_capacity: Initial number of events to allocate
+            growth_factor: Factor by which to grow when capacity exceeded
+        """
+        import pickle
+        import struct
+        
+        self.idx_path = idx_path
+        self.growth_factor = growth_factor
+        self.event_count = 0
+        self.capacity = initial_capacity
+        
+        # Calculate header size
+        with open(idx_path, 'rb') as f:
+            dtype_size = struct.unpack('<I', f.read(4))[0]
+            self.header_size = 4 + dtype_size
+        
+        # Create initial memory map
+        self.mmap = np.memmap(idx_path, dtype=EVENT_RECORD_DTYPE, mode='r+',
+                             offset=self.header_size, shape=(self.capacity,))
+    
+    def write_event(self, event_record: np.ndarray) -> None:
+        """
+        Write a single event record, growing the file if necessary.
+        
+        Args:
+            event_record: Single EventRecord to write
+        """
+        # Check if we need to grow the file
+        if self.event_count >= self.capacity:
+            self._grow_file()
+        
+        # Write the event
+        self.mmap[self.event_count] = event_record
+        self.event_count += 1
+    
+    def _grow_file(self) -> None:
+        """
+        Grow the memory-mapped file to accommodate more events.
+        """
+        # Calculate new capacity
+        new_capacity = int(self.capacity * self.growth_factor)
+        
+        # Close current mmap
+        del self.mmap
+        
+        # Extend the file
+        current_size = os.path.getsize(self.idx_path)
+        additional_bytes = (new_capacity - self.capacity) * EVENT_RECORD_SIZE
+        
+        with open(self.idx_path, 'r+b') as f:
+            f.seek(0, 2)  # Seek to end
+            f.write(b'\x00' * additional_bytes)
+        
+        # Create new memory map with larger capacity
+        self.mmap = np.memmap(self.idx_path, dtype=EVENT_RECORD_DTYPE, mode='r+',
+                             offset=self.header_size, shape=(new_capacity,))
+        
+        self.capacity = new_capacity
+        print(f"Expanded index file capacity to {new_capacity:,} events")
+    
+    def finalize(self) -> int:
+        """
+        Finalize the file by truncating to actual size.
+        
+        Returns:
+            Number of events written
+        """
+        if self.event_count < self.capacity:
+            # Truncate file to actual size
+            final_size = self.header_size + (self.event_count * EVENT_RECORD_SIZE)
+            
+            # Close mmap before truncating
+            del self.mmap
+            
+            with open(self.idx_path, 'r+b') as f:
+                f.truncate(final_size)
+        
+        return self.event_count
 
 
 def load_mmap_files(input_path: str) -> Tuple[np.memmap, np.memmap]:
@@ -233,6 +365,18 @@ def load_ntmmap(input_path: str) -> Tuple[np.memmap, np.memmap, np.dtype]:
     photons_array = np.memmap(dat_path, dtype=photon_dtype, mode='r', offset=data_start)
     
     return index_mmap, photons_array, photon_dtype
+
+
+def append_photons_to_file(dat_path: str, photon_array: np.ndarray) -> None:
+    """
+    Append photon data to the data file.
+    
+    Args:
+        dat_path: Path to the data file
+        photon_array: Array of photon hits to append
+    """
+    with open(dat_path, 'ab') as f:
+        f.write(photon_array.tobytes())
 
 
 def get_event_photons(photons_array: np.memmap, event_record: np.ndarray) -> np.ndarray:

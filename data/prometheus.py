@@ -298,21 +298,6 @@ def process_photons_with_grouping(photons_dict: Dict[str, np.ndarray],
     }
 
 
-def count_total_events(parquet_files: list) -> int:
-    """
-    Count total number of events across all parquet files.
-    
-    Args:
-        parquet_files: List of parquet file paths
-        
-    Returns:
-        Total number of events
-    """
-    total = 0
-    for file_path in parquet_files:
-        df = pd.read_parquet(file_path)
-        total += len(df)
-    return total
 
 
 def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any], Dict[str, np.ndarray]]]:
@@ -348,12 +333,13 @@ def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any]
 def convert_prometheus_to_mmap(input_path: str, output_path: str,
                               file_range: str = None, grouping_window_ns: float = 0.0) -> Tuple[int, int]:
     """
-    Convert Prometheus parquet files to memory-mapped format.
+    Convert Prometheus parquet files to memory-mapped format using streaming approach.
     
     Args:
         input_path: Directory containing chunk_*.parquet files
         output_path: Output path for memory-mapped files (without extension)
         file_range: Range of files to convert, e.g., '0-100' or '100-115'
+        grouping_window_ns: Time window for hit grouping per sensor (0 = no grouping)
         
     Returns:
         Tuple of (num_events_converted, total_photons)
@@ -372,60 +358,54 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
         except ValueError:
             print(f"Invalid file range format: {file_range}. Processing all files.")
     
-    # Count total events in selected files
-    total_events = count_total_events(parquet_files)
-    print(f"Converting {total_events} events from {len(parquet_files)} files...")
+    print(f"Converting events from {len(parquet_files)} files using streaming approach...")
     
-    # Create files with headers
-    from core.mmap_format import create_mmap_files_with_headers, create_index_mmap_with_header
+    # Create streaming memory-mapped files
+    from core.mmap_format import create_streaming_mmap_files, StreamingIndexWriter, append_photons_to_file
     
-    idx_path, data_file_path = create_mmap_files_with_headers(output_path, total_events)
+    # Estimate events per file for initial allocation (Prometheus files are typically larger)
+    events_per_file_estimate = 5000  # Higher estimate for parquet files
+    initial_estimate = len(parquet_files) * events_per_file_estimate
     
-    # Create memory map for index (skipping header)
-    index_mmap = create_index_mmap_with_header(idx_path, total_events)
+    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate)
+    index_writer = StreamingIndexWriter(idx_path, initial_estimate)
     
     # Convert events
-    event_idx = 0
     total_photons = 0
     current_photon_idx = 0
     
-    with open(data_file_path, 'ab') as data_file:  # Append mode to preserve header
-        for mc_truth, photons_raw in iter_prometheus_events(parquet_files):
-            
-            # Create event record
-            event_record = EventRecord.from_dict(mc_truth)
-            
-            # Process photons with optional grouping
-            photons = process_photons_with_grouping(photons_raw, grouping_window_ns)
-            
-            # Create photon array
-            photon_array = PhotonHit.from_dict(photons)
-            num_photons = len(photon_array)
-            
-            # Set photon indexing information
-            event_record['photon_start_idx'] = current_photon_idx
-            event_record['photon_end_idx'] = current_photon_idx + num_photons
-            
-            # Store event record in memory map
-            index_mmap[event_idx] = event_record
-            
-            # Write photons to data file
-            if num_photons > 0:
-                photon_bytes = photon_array.tobytes()
-                data_file.write(photon_bytes)
-                current_photon_idx += num_photons
-                total_photons += num_photons
-            
-            event_idx += 1
-            
-            # Progress reporting
-            if event_idx % 1000 == 0:
-                print(f"Processed {event_idx:,} events, {total_photons:,} photons")
+    for mc_truth, photons_raw in iter_prometheus_events(parquet_files):
+        # Create event record
+        event_record = EventRecord.from_dict(mc_truth)
+        
+        # Process photons with optional grouping
+        photons = process_photons_with_grouping(photons_raw, grouping_window_ns)
+        
+        # Create photon array
+        photon_array = PhotonHit.from_dict(photons)
+        num_photons = len(photon_array)
+        
+        # Set photon indexing information
+        event_record['photon_start_idx'] = current_photon_idx
+        event_record['photon_end_idx'] = current_photon_idx + num_photons
+        
+        # Write event record (with dynamic growth)
+        index_writer.write_event(event_record)
+        
+        # Append photons to data file
+        if num_photons > 0:
+            append_photons_to_file(data_file_path, photon_array)
+            current_photon_idx += num_photons
+            total_photons += num_photons
+        
+        # Progress reporting
+        if index_writer.event_count % 1000 == 0:
+            print(f"Processed {index_writer.event_count:,} events, {total_photons:,} photons")
     
-    # Flush memory maps
-    index_mmap.flush()
+    # Finalize index file
+    final_event_count = index_writer.finalize()
     
-    print(f"Conversion complete: {event_idx} events, {total_photons:,} total photons")
+    print(f"Conversion complete: {final_event_count:,} events, {total_photons:,} total photons")
     print(f"Output files: {output_path}.idx, {output_path}.dat")
     
-    return event_idx, total_photons
+    return final_event_count, total_photons

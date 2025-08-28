@@ -133,17 +133,6 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
         'id_idx': np.array(all_id_idx, dtype=np.uint64),
     }
 
-def count_total_events(i3_files: List[str]) -> int:
-    """Count the total number of physics events across all i3 files."""
-    total = 0
-    for file_path in i3_files:
-        i3_file = dataio.I3File(file_path)
-        while i3_file.more():
-            frame = i3_file.pop_physics()
-            if frame and frame.Has("I3EventHeader") and frame["I3EventHeader"].sub_event_stream != "NullSplit":
-                total += 1
-        i3_file.close()
-    return total
 
 def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
@@ -197,7 +186,7 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
 
 def convert_icecube_to_mmap(input_path: str, output_path: str,
                                file_range: str = None, pulse_key: str = "SplitInIceDSTPulses") -> Tuple[int, int]:
-    """Convert IceCube i3 files to memory-mapped format."""
+    """Convert IceCube i3 files to memory-mapped format using streaming approach."""
     
     # Find and filter input files
     i3_files = find_i3_files(input_path)
@@ -208,58 +197,57 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
         i3_files = i3_files[start:end]
         print(f"Processing files from index {start} to {end}")
     
-    # Load geometry and count events
+    # Load geometry
     gcd_file = os.path.join(os.path.dirname(__file__), '..', 'resources', 'GeoCalibDetectorStatus_IC86.AVG_Pass2_SF0.99.i3')
     geometry = load_geometry(gcd_file)
     
-    total_events = count_total_events(i3_files)
-    print(f"Converting {total_events} events from {len(i3_files)} files...")
+    print(f"Converting events from {len(i3_files)} files using streaming approach...")
     
-    # Create memory-mapped files
-    from core.mmap_format import create_mmap_files_with_headers, create_index_mmap_with_header
+    # Create streaming memory-mapped files
+    from core.mmap_format import create_streaming_mmap_files, StreamingIndexWriter, append_photons_to_file
     
-    idx_path, data_file_path = create_mmap_files_with_headers(output_path, total_events)
-    index_mmap = create_index_mmap_with_header(idx_path, total_events)
+    # Estimate events per file for initial allocation
+    events_per_file_estimate = 1000  # Conservative estimate
+    initial_estimate = len(i3_files) * events_per_file_estimate
+    
+    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate)
+    index_writer = StreamingIndexWriter(idx_path, initial_estimate)
     
     # Convert events
-    event_idx = 0
     total_photons = 0
     current_photon_idx = 0
     
-    with open(data_file_path, 'ab') as data_file:
-        for frame in iter_i3_events(i3_files):
-            
-            # Create event record from MC truth
-            mc_truth = parse_mc_truth(frame)
-            event_record = EventRecord.from_dict(mc_truth)
-            
-            # Process photons
-            photons = parse_pulses(frame, pulse_key, geometry)
-            photon_array = PhotonHit.from_dict(photons)
-            num_photons = len(photon_array)
-            
-            # Set photon indexing
-            event_record['photon_start_idx'] = current_photon_idx
-            event_record['photon_end_idx'] = current_photon_idx + num_photons
-            
-            # Store event record
-            index_mmap[event_idx] = event_record
-            
-            # Write photons to data file
-            if num_photons > 0:
-                data_file.write(photon_array.tobytes())
-                current_photon_idx += num_photons
-                total_photons += num_photons
-            
-            event_idx += 1
-            
-            if event_idx % 1000 == 0:
-                print(f"Processed {event_idx:,} events, {total_photons:,} photons")
+    for frame in iter_i3_events(i3_files):
+        # Create event record from MC truth
+        mc_truth = parse_mc_truth(frame)
+        event_record = EventRecord.from_dict(mc_truth)
+        
+        # Process photons
+        photons = parse_pulses(frame, pulse_key, geometry)
+        photon_array = PhotonHit.from_dict(photons)
+        num_photons = len(photon_array)
+        
+        # Set photon indexing
+        event_record['photon_start_idx'] = current_photon_idx
+        event_record['photon_end_idx'] = current_photon_idx + num_photons
+        
+        # Write event record (with dynamic growth)
+        index_writer.write_event(event_record)
+        
+        # Append photons to data file
+        if num_photons > 0:
+            append_photons_to_file(data_file_path, photon_array)
+            current_photon_idx += num_photons
+            total_photons += num_photons
+        
+        # Progress reporting
+        if index_writer.event_count % 1000 == 0:
+            print(f"Processed {index_writer.event_count:,} events, {total_photons:,} photons")
     
-    # Finalize
-    index_mmap.flush()
+    # Finalize index file
+    final_event_count = index_writer.finalize()
     
-    print(f"Conversion complete: {event_idx} events, {total_photons:,} total photons")
+    print(f"Conversion complete: {final_event_count:,} events, {total_photons:,} total photons")
     print(f"Output files: {output_path}.idx, {output_path}.dat")
     
-    return event_idx, total_photons
+    return final_event_count, total_photons
