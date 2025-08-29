@@ -8,9 +8,9 @@ from typing import Tuple, Dict, Any
 
 # Define the event record structure
 EVENT_RECORD_DTYPE = np.dtype([
-    # Indexing (photon indices, not byte offsets)
-    ('photon_start_idx', np.uint32),
-    ('photon_end_idx', np.uint32),
+    # Indexing (photon indices, not byte offsets) - uint64 to prevent overflow
+    ('photon_start_idx', np.uint64),
+    ('photon_end_idx', np.uint64),
     
     # MC Truth scalars
     ('initial_energy', np.float32),
