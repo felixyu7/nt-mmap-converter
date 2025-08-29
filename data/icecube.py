@@ -227,6 +227,10 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
         photon_array = PhotonHit.from_dict(photons)
         num_photons = len(photon_array)
         
+        # Skip events with no photons - they're not useful for ML training
+        if num_photons == 0:
+            continue
+        
         # Set photon indexing
         event_record['photon_start_idx'] = current_photon_idx
         event_record['photon_end_idx'] = current_photon_idx + num_photons
@@ -235,10 +239,9 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
         index_writer.write_event(event_record)
         
         # Append photons to data file
-        if num_photons > 0:
-            append_photons_to_file(data_file_path, photon_array)
-            current_photon_idx += num_photons
-            total_photons += num_photons
+        append_photons_to_file(data_file_path, photon_array)
+        current_photon_idx += num_photons
+        total_photons += num_photons
         
         # Progress reporting
         if index_writer.event_count % 1000 == 0:
