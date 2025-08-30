@@ -367,7 +367,7 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     events_per_file_estimate = 5000  # Higher estimate for parquet files
     initial_estimate = len(parquet_files) * events_per_file_estimate
     
-    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate)
+    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate, source_type='prometheus')
     index_writer = StreamingIndexWriter(idx_path, initial_estimate)
     
     # Convert events
@@ -375,9 +375,6 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     current_photon_idx = 0
     
     for mc_truth, photons_raw in iter_prometheus_events(parquet_files):
-        # Create event record
-        event_record = EventRecord.from_dict(mc_truth)
-        
         # Process photons with optional grouping
         photons = process_photons_with_grouping(photons_raw, grouping_window_ns)
         
@@ -388,6 +385,16 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
         # Skip events with no photons - they're not useful for ML training
         if num_photons == 0:
             continue
+            
+        # Compute hit statistics
+        mc_truth['num_hits'] = num_photons
+        # Count unique sensor/string ID pairs (channels) for Prometheus
+        sensor_string_pairs = np.column_stack([photons['string_id'], photons['sensor_id']])
+        unique_channels = np.unique(sensor_string_pairs, axis=0)
+        mc_truth['num_chans'] = len(unique_channels)
+        
+        # Create event record using Prometheus-specific dtype
+        event_record = EventRecord.from_dict(mc_truth, source_type='prometheus')
         
         # Set photon indexing information
         event_record['photon_start_idx'] = current_photon_idx

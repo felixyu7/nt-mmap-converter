@@ -30,7 +30,8 @@ _PDGMAP = {
     dataclasses.I3Particle.ParticleType.NuTauBar: -16,
     dataclasses.I3Particle.ParticleType.Pi0: 111,
     dataclasses.I3Particle.ParticleType.PiPlus: 211,
-    dataclasses.I3Particle.ParticleType.PiMinus: -211
+    dataclasses.I3Particle.ParticleType.PiMinus: -211,
+    dataclasses.I3Particle.ParticleType.Hadrons: 99  # Special IceCube hadron shower
 }
 
 def find_i3_files(input_path: str) -> List[str]:
@@ -136,17 +137,43 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
 
 def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
-    if "I3MCTree" not in frame:
+    parsed = {}
+    
+    # Try to get MC truth from I3MCTree_preMuonProp first (preferred for hadrons)
+    mc_tree_key = "I3MCTree_preMuonProp" if "I3MCTree_preMuonProp" in frame else "I3MCTree"
+    
+    if mc_tree_key not in frame:
         return {}
 
-    mc_tree = frame["I3MCTree"]
+    mc_tree = frame[mc_tree_key]
     
     if not hasattr(mc_tree, 'primaries') or len(mc_tree.primaries) == 0:
         return {}
     
     primary = mc_tree.primaries[0]
     
-    # Find final state lepton
+    # Fill basic MC truth
+    parsed.update({
+        'initial_energy': primary.energy,
+        'initial_zenith': primary.dir.zenith,
+        'initial_azimuth': primary.dir.azimuth,
+        'initial_x': primary.pos.x,
+        'initial_y': primary.pos.y,
+        'initial_z': primary.pos.z,
+        'initial_type': _PDGMAP.get(primary.type),
+    })
+    
+    # Initialize final state arrays
+    final_energy = [0.0] * 5
+    final_type = [0] * 5
+    final_zenith = [0.0] * 5
+    final_azimuth = [0.0] * 5
+    final_x = [0.0] * 5
+    final_y = [0.0] * 5
+    final_z = [0.0] * 5
+    final_parent = [0] * 5
+    
+    # Look for final state particles
     lepton_types = {
         dataclasses.I3Particle.ParticleType.EMinus,
         dataclasses.I3Particle.ParticleType.EPlus,
@@ -157,30 +184,67 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     }
     
     final_lepton = None
+    final_hadrons = None
+    
     for particle in mc_tree:
-        if particle.type in lepton_types and particle.id != primary.id:
+        # Skip primary
+        if particle.id == primary.id:
+            continue
+            
+        # Look for final state lepton
+        if particle.type in lepton_types and final_lepton is None:
             final_lepton = particle
-            break
+            
+        # Look for hadrons (special IceCube particle type)
+        if particle.type == dataclasses.I3Particle.ParticleType.Hadrons and final_hadrons is None:
+            final_hadrons = particle
     
-    parsed = {
-        'initial_energy': primary.energy,
-        'initial_zenith': primary.dir.zenith,
-        'initial_azimuth': primary.dir.azimuth,
-        'initial_x': primary.pos.x,
-        'initial_y': primary.pos.y,
-        'initial_z': primary.pos.z,
-        'initial_type': _PDGMAP.get(primary.type),
-    }
-    
-    # Store final lepton as arrays (EventRecord expects arrays, not scalars)
+    # Store final lepton at index 0
     if final_lepton:
-        parsed['final_energy'] = [final_lepton.energy]
-        parsed['final_zenith'] = [final_lepton.dir.zenith]
-        parsed['final_azimuth'] = [final_lepton.dir.azimuth]
-        parsed['final_x'] = [final_lepton.pos.x]
-        parsed['final_y'] = [final_lepton.pos.y]
-        parsed['final_z'] = [final_lepton.pos.z]
-        parsed['final_type'] = [_PDGMAP.get(final_lepton.type)]
+        final_energy[0] = final_lepton.energy
+        final_type[0] = _PDGMAP.get(final_lepton.type, 0)
+        final_zenith[0] = final_lepton.dir.zenith
+        final_azimuth[0] = final_lepton.dir.azimuth
+        final_x[0] = final_lepton.pos.x
+        final_y[0] = final_lepton.pos.y
+        final_z[0] = final_lepton.pos.z
+        final_parent[0] = primary.id if hasattr(primary, 'id') else 0
+    
+    # Store hadrons at index 1
+    if final_hadrons:
+        final_energy[1] = final_hadrons.energy
+        final_type[1] = _PDGMAP.get(final_hadrons.type, 0)
+        final_zenith[1] = final_hadrons.dir.zenith
+        final_azimuth[1] = final_hadrons.dir.azimuth
+        final_x[1] = final_hadrons.pos.x
+        final_y[1] = final_hadrons.pos.y
+        final_z[1] = final_hadrons.pos.z
+        final_parent[1] = primary.id if hasattr(primary, 'id') else 0
+    
+    # Add final state arrays to parsed data
+    parsed.update({
+        'final_energy': final_energy,
+        'final_type': final_type,
+        'final_zenith': final_zenith,
+        'final_azimuth': final_azimuth,
+        'final_x': final_x,
+        'final_y': final_y,
+        'final_z': final_z,
+        'final_parent': final_parent,
+    })
+    
+    # Add IceCube-specific fields
+    if "Homogenized_QTot" in frame:
+        parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
+    
+    if "FilterMask" in frame:
+        filter_mask = frame["FilterMask"]
+        # Convert I3FilterResult map to dictionary
+        filter_dict = {}
+        for filter_name, result in filter_mask:
+            # Only store condition result (passed/failed)
+            filter_dict[filter_name] = result.condition_passed
+        parsed['filter_mask'] = filter_dict
 
     return parsed
 
@@ -210,7 +274,7 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     events_per_file_estimate = 1000  # Conservative estimate
     initial_estimate = len(i3_files) * events_per_file_estimate
     
-    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate)
+    idx_path, data_file_path = create_streaming_mmap_files(output_path, initial_estimate, source_type='icecube')
     index_writer = StreamingIndexWriter(idx_path, initial_estimate)
     
     # Convert events
@@ -220,7 +284,6 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     for frame in iter_i3_events(i3_files):
         # Create event record from MC truth
         mc_truth = parse_mc_truth(frame)
-        event_record = EventRecord.from_dict(mc_truth)
         
         # Process photons
         photons = parse_pulses(frame, pulse_key, geometry)
@@ -230,6 +293,16 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
         # Skip events with no photons - they're not useful for ML training
         if num_photons == 0:
             continue
+            
+        # Compute hit statistics
+        mc_truth['num_hits'] = num_photons
+        # Count unique OMKeys (string_id, sensor_id pairs) for IceCube
+        omkey_pairs = np.column_stack([photons['string_id'], photons['sensor_id']])
+        unique_omkeys = np.unique(omkey_pairs, axis=0)
+        mc_truth['num_chans'] = len(unique_omkeys)
+        
+        # Create event record using IceCube-specific dtype
+        event_record = EventRecord.from_dict(mc_truth, source_type='icecube')
         
         # Set photon indexing
         event_record['photon_start_idx'] = current_photon_idx
