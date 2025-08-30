@@ -171,7 +171,6 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     final_x = [0.0] * 5
     final_y = [0.0] * 5
     final_z = [0.0] * 5
-    final_parent = [0] * 5
     
     # Look for final state particles
     lepton_types = {
@@ -208,7 +207,6 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         final_x[0] = final_lepton.pos.x
         final_y[0] = final_lepton.pos.y
         final_z[0] = final_lepton.pos.z
-        final_parent[0] = primary.id if hasattr(primary, 'id') else 0
     
     # Store hadrons at index 1
     if final_hadrons:
@@ -219,7 +217,6 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         final_x[1] = final_hadrons.pos.x
         final_y[1] = final_hadrons.pos.y
         final_z[1] = final_hadrons.pos.z
-        final_parent[1] = primary.id if hasattr(primary, 'id') else 0
     
     # Add final state arrays to parsed data
     parsed.update({
@@ -230,7 +227,6 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         'final_x': final_x,
         'final_y': final_y,
         'final_z': final_z,
-        'final_parent': final_parent,
     })
     
     # Add IceCube-specific fields

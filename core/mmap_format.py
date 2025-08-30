@@ -43,7 +43,6 @@ PROMETHEUS_EVENT_RECORD_DTYPE = np.dtype([
     ('final_x', np.float32, (5,)),
     ('final_y', np.float32, (5,)),
     ('final_z', np.float32, (5,)),
-    ('final_parent', np.int32, (5,)),
 ])
 
 # Define IceCube event record structure
@@ -58,20 +57,15 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     
     # IceCube-specific fields
     ('homogenized_qtot', np.float32),           # Homogenized total charge
-    ('num_filters', np.uint8),                  # Number of active filters
-    ('filter_results', FILTER_RESULT_DTYPE, 50), # Array of 50 filter results
+    ('filter_masks', FILTER_RESULT_DTYPE, 50),  # Array of up to 50 filter masks
     
-    # MC Truth scalars
+    # MC Truth scalars (IceCube subset)
     ('initial_energy', np.float32),
     ('initial_zenith', np.float32),
     ('initial_azimuth', np.float32),
     ('initial_x', np.float32),
     ('initial_y', np.float32),
     ('initial_z', np.float32),
-    ('bjorken_x', np.float32),
-    ('bjorken_y', np.float32),
-    ('column_depth', np.float32),
-    ('interaction', np.int32),
     ('initial_type', np.int32),
     
     # Final state arrays (5 particles, zero-padded)
@@ -83,7 +77,6 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     ('final_x', np.float32, (5,)),
     ('final_y', np.float32, (5,)),
     ('final_z', np.float32, (5,)),
-    ('final_parent', np.int32, (5,)),
 ])
 
 # Keep EVENT_RECORD_DTYPE as alias for backward compatibility
@@ -127,10 +120,14 @@ class EventRecord:
         else:
             record = np.zeros(1, dtype=PROMETHEUS_EVENT_RECORD_DTYPE)[0]
         
-        # Fill scalar fields
-        scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
-                        'initial_x', 'initial_y', 'initial_z', 'bjorken_x',
-                        'bjorken_y', 'column_depth', 'interaction', 'initial_type']
+        # Fill scalar fields (source-specific)
+        if source_type.lower() == 'icecube':
+            scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
+                             'initial_x', 'initial_y', 'initial_z', 'initial_type']
+        else:
+            scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
+                             'initial_x', 'initial_y', 'initial_z', 'bjorken_x',
+                             'bjorken_y', 'column_depth', 'interaction', 'initial_type']
         
         for field in scalar_fields:
             if field in data:
@@ -150,16 +147,13 @@ class EventRecord:
             # Handle FilterMask
             if 'filter_mask' in data and isinstance(data['filter_mask'], dict):
                 filter_items = list(data['filter_mask'].items())
-                num_filters = min(len(filter_items), 50)  # Max 50 filters
-                record['num_filters'] = num_filters
-                
                 for i, (filter_name, passed) in enumerate(filter_items[:50]):
-                    record['filter_results'][i]['name'] = filter_name[:32]  # Truncate to 32 chars
-                    record['filter_results'][i]['passed'] = bool(passed)
+                    record['filter_masks'][i]['name'] = filter_name[:32]  # Truncate to 32 chars
+                    record['filter_masks'][i]['passed'] = bool(passed)
         
         # Fill array fields (with zero-padding)
         array_fields = ['final_energy', 'final_type', 'final_zenith', 'final_azimuth',
-                       'final_x', 'final_y', 'final_z', 'final_parent']
+                       'final_x', 'final_y', 'final_z']
         
         for field in array_fields:
             if field in data:
@@ -459,7 +453,6 @@ def load_ntmmap(input_path: str) -> Tuple[np.memmap, np.memmap, np.dtype]:
     photons_array = np.memmap(dat_path, dtype=photon_dtype, mode='r', offset=data_start)
     
     return index_mmap, photons_array, photon_dtype
-
 
 
 def append_photons_to_file(dat_path: str, photon_array: np.ndarray) -> None:
