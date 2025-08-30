@@ -67,8 +67,8 @@ high_activity = events['num_chans'] >= 10
 filtered = events[energy_mask & high_activity]
 
 # IceCube FilterMask (vectorized)
-filter_names = events['filter_results']['name'] 
-filter_passed = events['filter_results']['passed']
+filter_names = events['filter_masks']['name'] 
+filter_passed = events['filter_masks']['passed']
 cascade_mask = np.any((filter_names == "CascadeFilter_13") & filter_passed, axis=1)
 
 # Deterministic train/validation split in O(1)
