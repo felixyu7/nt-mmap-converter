@@ -63,15 +63,29 @@ def load_geometry(gcd_file: str) -> dataclasses.I3Geometry:
     return g_frame["I3Geometry"]
 
 def iter_i3_events(i3_files: List[str]) -> Iterator[icetray.I3Frame]:
-    """Iterate over all physics frames in IceCube i3 files."""
-    for file_path in i3_files:
-        print(f"Processing {os.path.basename(file_path)}...")
-        i3_file = dataio.I3File(file_path)
-        while i3_file.more():
-            frame = i3_file.pop_physics()
-            if frame and frame.Has("I3EventHeader") and frame["I3EventHeader"].sub_event_stream != "NullSplit":
-                yield frame
-        i3_file.close()
+    """
+    Iterate over all physics frames in IceCube i3 files,
+    handling empty/corrupt files safely.
+    """
+    for path in i3_files:
+        label = os.path.basename(path)
+        print(f"Processing {label}...")
+        
+        i3_file = dataio.I3File(path)
+
+        try:
+            while i3_file.more():
+                try:
+                    frame = i3_file.pop_physics()
+                except Exception as e:
+                    print(f"Warning: stopping {label} due to read error: {e}")
+                    break
+
+                if frame and frame.Has("I3EventHeader"):
+                    if frame["I3EventHeader"].sub_event_stream != "NullSplit":
+                        yield frame
+        finally:
+            i3_file.close()
 
 def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I3Geometry) -> Dict[str, np.ndarray]:
     """Parse pulse data from an I3Frame."""
@@ -197,6 +211,94 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         # Look for hadrons (special IceCube particle type)
         if particle.type == dataclasses.I3Particle.ParticleType.Hadrons and final_hadrons is None:
             final_hadrons = particle
+
+    # Determine interaction type (CC/NC) using FIRST child of the primary
+    try:
+        def _ptype_name(pt):
+            name = getattr(pt, 'name', str(pt))
+            if '.' in name:
+                name = name.split('.')[-1]
+            return name
+
+        def _neutrino_flavor(pt):
+            n = _ptype_name(pt)
+            if n.endswith('Bar'):
+                n = n[:-3]
+            return n if n in ('NuE', 'NuMu', 'NuTau') else None
+
+        def _lepton_family(pt):
+            n = _ptype_name(pt)
+            if n.startswith('E'):
+                return 'E'
+            if n.startswith('Mu'):
+                return 'Mu'
+            if n.startswith('Tau'):
+                return 'Tau'
+            return None
+
+        primary_flavor = _neutrino_flavor(primary.type)
+
+        # Attempt to get FIRST child of the primary from the MCTree
+        children = []
+        try:
+            if hasattr(mc_tree, 'children'):
+                children = list(mc_tree.children(primary))
+            elif hasattr(mc_tree, 'get_daughters'):
+                children = list(mc_tree.get_daughters(primary))
+        except Exception:
+            children = []
+
+        cc_nc = None
+        base_name = _ptype_name(primary.type)
+        # Strip 'Bar' for neutrinos only in the saved interaction
+        if base_name.endswith('Bar') and base_name.startswith('Nu'):
+            base_name = base_name[:-3]
+
+        first_child = children[0] if children else None
+        if primary_flavor is not None and first_child is not None:
+            fam = _lepton_family(first_child.type)
+            # CC if the first child is the corresponding charged lepton family
+            if ((primary_flavor == 'NuE' and fam == 'E') or
+                (primary_flavor == 'NuMu' and fam == 'Mu') or
+                (primary_flavor == 'NuTau' and fam == 'Tau')):
+                cc_nc = 'CC'
+            else:
+                # NC if the first child is an outgoing neutrino of the same flavor
+                child_flavor = _neutrino_flavor(first_child.type)
+                if child_flavor == primary_flavor:
+                    cc_nc = 'NC'
+
+        # Fallback: scan full tree if FIRST-child rule didn't decide
+        if cc_nc is None and primary_flavor is not None:
+            lepton_types = {
+                dataclasses.I3Particle.ParticleType.EMinus,
+                dataclasses.I3Particle.ParticleType.EPlus,
+                dataclasses.I3Particle.ParticleType.MuMinus,
+                dataclasses.I3Particle.ParticleType.MuPlus,
+                dataclasses.I3Particle.ParticleType.TauMinus,
+                dataclasses.I3Particle.ParticleType.TauPlus
+            }
+            # Any charged lepton anywhere -> CC
+            found_lepton = any((p.type in lepton_types) and (p.id != primary.id) for p in mc_tree)
+            if found_lepton:
+                cc_nc = 'CC'
+            else:
+                # Same-flavor neutrino anywhere -> NC
+                for p in mc_tree:
+                    if p.id == primary.id:
+                        continue
+                    if _neutrino_flavor(p.type) == primary_flavor:
+                        cc_nc = 'NC'
+                        break
+
+        interaction_str = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
+        parsed['interaction'] = interaction_str
+    except Exception:
+        # Never fail conversion due to interaction labeling
+        n = _ptype_name(primary.type)
+        if n.endswith('Bar') and n.startswith('Nu'):
+            n = n[:-3]
+        parsed['interaction'] = n
     
     # Store final lepton at index 0
     if final_lepton:
