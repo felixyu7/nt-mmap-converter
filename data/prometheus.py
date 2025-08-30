@@ -85,34 +85,26 @@ def group_hits_by_window(hit_times, hit_charges, time_window, return_counts=Fals
 
 def find_parquet_files(input_path: str) -> list:
     """
-    Find all parquet chunk files in the input directory.
+    Find all parquet files in the input directory.
     
     Args:
-        input_path: Directory containing chunk_*.parquet files
+        input_path: Directory containing .parquet files
         
     Returns:
-        List of parquet file paths, sorted by chunk number
+        List of parquet file paths, sorted appropriately
     """
     if not os.path.isdir(input_path):
         raise ValueError(f"Input path is not a directory: {input_path}")
     
-    # Find all chunk files
+    # Find all parquet files
     pattern = os.path.join(input_path, "*.parquet")
     files = glob.glob(pattern)
     
     if not files:
         raise ValueError(f"No .parquet files found in {input_path}")
     
-    # Sort by chunk number
-    def get_chunk_number(filepath):
-        basename = os.path.basename(filepath)
-        # Extract number from "chunk_N.parquet"
-        try:
-            return int(basename.split('_')[1].split('.')[0])
-        except (IndexError, ValueError):
-            return 0
-    
-    files.sort(key=get_chunk_number)
+    # Sort alphabetically for consistent ordering
+    files.sort()
     return files
 
 
