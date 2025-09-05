@@ -58,6 +58,13 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     # IceCube-specific fields
     ('homogenized_qtot', np.float32),           # Homogenized total charge
     ('filter_masks', FILTER_RESULT_DTYPE, 50),  # Array of up to 50 filter masks
+    # Selected filter pass flags (condition AND prescale)
+    ('filter_muon_13', np.bool_),
+    ('filter_cascade_13', np.bool_),
+    ('filter_fss_13', np.bool_),
+    ('filter_hese_15', np.bool_),
+    ('filter_onlinel2_17', np.bool_),
+    ('filter_sun_13', np.bool_),
     
     # MC Truth scalars (IceCube subset)
     ('initial_energy', np.float32),
@@ -124,7 +131,10 @@ class EventRecord:
         # Fill scalar fields (source-specific)
         if source_type.lower() == 'icecube':
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
-                             'initial_x', 'initial_y', 'initial_z', 'initial_type', 'interaction']
+                             'initial_x', 'initial_y', 'initial_z', 'initial_type', 'interaction',
+                             # Selected filter flags
+                             'filter_muon_13', 'filter_cascade_13', 'filter_fss_13',
+                             'filter_hese_15', 'filter_onlinel2_17', 'filter_sun_13']
         else:
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
                              'initial_x', 'initial_y', 'initial_z', 'bjorken_x',

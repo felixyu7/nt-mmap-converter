@@ -93,8 +93,10 @@ val_events = events[indices[int(0.8*n):]]
 
 **IceCube Events (+ above):**
 - `homogenized_qtot` - Total charge (when available)
-- `num_filters` - Number of active filters
-- `filter_results[50]` - FilterMask array with `name` and `passed` fields
+ - `filter_results[50]` - FilterMask array with `name` and `passed` (condition AND prescale) fields
+ - Selected filter booleans (both must pass, exact names):
+  - `filter_muon_13`, `filter_cascade_13`, `filter_fss_13`,
+    `filter_hese_15`, `filter_onlinel2_17`, `filter_sun_13`
 - `final_*[0]` - Final state lepton, `final_*[1]` - Hadron shower
 
 **Photon Hits:**

@@ -334,15 +334,32 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     # Add IceCube-specific fields
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
-    
+
+    # Initialize selected filter-pass booleans (condition AND prescale, exact matching)
+    selected_filters = {
+        "MuonFilter_13": "filter_muon_13",
+        "CascadeFilter_13": "filter_cascade_13",
+        "FSSFilter_13": "filter_fss_13",
+        "HESEFilter_15": "filter_hese_15",
+        "OnlineL2Filter_17": "filter_onlinel2_17",
+        "SunFilter_13": "filter_sun_13",
+    }
+    for _k, out_name in selected_filters.items():
+        parsed[out_name] = False
+
     if "FilterMask" in frame:
         filter_mask = frame["FilterMask"]
-        # Convert I3FilterResult map to dictionary
+        # Convert I3FilterResult map to dictionary (condition AND prescale)
         filter_dict = {}
         for filter_name, result in filter_mask:
-            # Only store condition result (passed/failed)
-            filter_dict[filter_name] = result.condition_passed
+            cond = bool(getattr(result, 'condition_passed', False))
+            pres = bool(getattr(result, 'prescale_passed', False))
+            filter_dict[filter_name] = cond and pres
         parsed['filter_mask'] = filter_dict
+
+        # Populate selected filter booleans from exact names (both must pass)
+        for in_name, out_name in selected_filters.items():
+            parsed[out_name] = bool(filter_dict.get(in_name, False))
 
     return parsed
 
