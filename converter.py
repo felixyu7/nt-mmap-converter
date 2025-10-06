@@ -7,10 +7,11 @@ memory-mapped files for ML training and analysis.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
-from pathlib import Path
+from datetime import datetime
 
 from core.utils import print_dataset_info
 from data.prometheus import convert_prometheus_to_mmap
@@ -22,6 +23,30 @@ try:
 except ImportError:
     ICECUBE_AVAILABLE = False
     convert_icecube_to_mmap = None
+
+def write_run_config(output_base: str, args: argparse.Namespace, num_events: int,
+                     total_photons: int, elapsed_seconds: float) -> str:
+    """Persist conversion parameters and summary statistics alongside outputs."""
+    config_path = f"{output_base}.config.json"
+    payload = {
+        "timestamp_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "command": " ".join(sys.argv),
+        "args": {k: v for k, v in vars(args).items()},
+        "summary": {
+            "events_converted": num_events,
+            "photons_written": total_photons,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+        },
+    }
+
+    config_dir = os.path.dirname(config_path)
+    if config_dir and not os.path.exists(config_dir):
+        os.makedirs(config_dir, exist_ok=True)
+
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+    return config_path
 
 
 def main():
@@ -87,6 +112,20 @@ def main():
         default="SplitInIceDSTPulses",
         help="Name of the pulse series to extract from i3 files"
     )
+
+    parser.add_argument(
+        "--filters",
+        nargs="+",
+        default=None,
+        help="Filter names requiring condition_passed to include an IceCube event"
+    )
+
+    parser.add_argument(
+        "--subevent-streams",
+        nargs="+",
+        default=["InIceSplit"],
+        help="Sub-event stream names to include for IceCube frames"
+    )
     
     args = parser.parse_args()
     
@@ -111,28 +150,21 @@ def main():
     # Start conversion
     start_time = time.time()
     
-    try:
-        if args.source == "prometheus":
-            num_events, total_photons = convert_prometheus_to_mmap(
-                args.input, args.output, args.file_range, args.grouping_window_ns
-            )
-        elif args.source == "icecube":
-            if not ICECUBE_AVAILABLE:
-                print("Error: IceCube functionality requires the IceCube software framework.")
-                print("Please install IceCube software or use --source prometheus instead.")
-                sys.exit(1)
-            num_events, total_photons = convert_icecube_to_mmap(
-                args.input, args.output, args.file_range, args.pulse_key
-            )
-        else:
-            print(f"Error: Unsupported source format: {args.source}")
+    if args.source == "prometheus":
+        num_events, total_photons = convert_prometheus_to_mmap(
+            args.input, args.output, args.file_range, args.grouping_window_ns
+        )
+    elif args.source == "icecube":
+        if not ICECUBE_AVAILABLE:
+            print("Error: IceCube functionality requires the IceCube software framework.")
+            print("Please install IceCube software or use --source prometheus instead.")
             sys.exit(1)
-            
-    except Exception as e:
-        print(f"Error during conversion: {e}")
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
+        num_events, total_photons = convert_icecube_to_mmap(
+            args.input, args.output, args.file_range, args.pulse_key,
+            args.filters, args.subevent_streams
+        )
+    else:
+        print(f"Error: Unsupported source format: {args.source}")
         sys.exit(1)
     
     # Conversion complete
@@ -162,13 +194,13 @@ def main():
     
     # Dataset info
     if args.info:
-        try:
-            print_dataset_info(args.output)
-        except Exception as e:
-            print(f"Warning: Could not generate dataset info: {e}")
+        print_dataset_info(args.output)
     
+    config_path = write_run_config(args.output, args, num_events, total_photons, elapsed)
+
     print(f"\n✓ Conversion completed successfully!")
     print(f"Memory-mapped files created: {args.output}.idx, {args.output}.dat")
+    print(f"Run configuration saved to: {config_path}")
 
 
 if __name__ == "__main__":

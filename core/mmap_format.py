@@ -6,12 +6,6 @@ import numpy as np
 import os
 from typing import Tuple, Dict, Any
 
-# Define the filter result structure for IceCube
-FILTER_RESULT_DTYPE = np.dtype([
-    ('name', 'U32'),      # Filter name (32-char max)
-    ('passed', np.bool_)   # True/False result
-])
-
 # Define Prometheus event record structure
 PROMETHEUS_EVENT_RECORD_DTYPE = np.dtype([
     # Indexing (photon indices, not byte offsets) - uint64 to prevent overflow
@@ -57,15 +51,7 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     
     # IceCube-specific fields
     ('homogenized_qtot', np.float32),           # Homogenized total charge
-    ('filter_masks', FILTER_RESULT_DTYPE, 50),  # Array of up to 50 filter masks
-    # Selected filter pass flags (condition AND prescale)
-    ('filter_muon_13', np.bool_),
-    ('filter_cascade_13', np.bool_),
-    ('filter_fss_13', np.bool_),
-    ('filter_hese_15', np.bool_),
-    ('filter_onlinel2_17', np.bool_),
-    ('filter_sun_13', np.bool_),
-    
+
     # MC Truth scalars (IceCube subset)
     ('initial_energy', np.float32),
     ('initial_zenith', np.float32),
@@ -76,15 +62,14 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     ('initial_type', np.int32),
     ('interaction', 'U16'),
     
-    # Final state arrays (5 particles, zero-padded)
-    # Index 0: lepton, Index 1: hadrons, rest zero-padded
-    ('final_energy', np.float32, (5,)),
-    ('final_type', np.int32, (5,)),
-    ('final_zenith', np.float32, (5,)),
-    ('final_azimuth', np.float32, (5,)),
-    ('final_x', np.float32, (5,)),
-    ('final_y', np.float32, (5,)),
-    ('final_z', np.float32, (5,)),
+    # Final state arrays (2 particles: [0] lepton, [1] hadrons)
+    ('final_energy', np.float32, (2,)),
+    ('final_type', np.int32, (2,)),
+    ('final_zenith', np.float32, (2,)),
+    ('final_azimuth', np.float32, (2,)),
+    ('final_x', np.float32, (2,)),
+    ('final_y', np.float32, (2,)),
+    ('final_z', np.float32, (2,)),
 ])
 
 # Keep EVENT_RECORD_DTYPE as alias for backward compatibility
@@ -127,14 +112,11 @@ class EventRecord:
             record = np.zeros(1, dtype=ICECUBE_EVENT_RECORD_DTYPE)[0]
         else:
             record = np.zeros(1, dtype=PROMETHEUS_EVENT_RECORD_DTYPE)[0]
-        
+
         # Fill scalar fields (source-specific)
         if source_type.lower() == 'icecube':
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
-                             'initial_x', 'initial_y', 'initial_z', 'initial_type', 'interaction',
-                             # Selected filter flags
-                             'filter_muon_13', 'filter_cascade_13', 'filter_fss_13',
-                             'filter_hese_15', 'filter_onlinel2_17', 'filter_sun_13']
+                             'initial_x', 'initial_y', 'initial_z', 'initial_type', 'interaction']
         else:
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
                              'initial_x', 'initial_y', 'initial_z', 'bjorken_x',
@@ -154,29 +136,23 @@ class EventRecord:
         if source_type.lower() == 'icecube':
             if 'homogenized_qtot' in data:
                 record['homogenized_qtot'] = data['homogenized_qtot']
-                
-            # Handle FilterMask
-            if 'filter_mask' in data and isinstance(data['filter_mask'], dict):
-                filter_items = list(data['filter_mask'].items())
-                for i, (filter_name, passed) in enumerate(filter_items[:50]):
-                    record['filter_masks'][i]['name'] = filter_name[:32]  # Truncate to 32 chars
-                    record['filter_masks'][i]['passed'] = bool(passed)
-        
+
         # Fill array fields (with zero-padding)
         array_fields = ['final_energy', 'final_type', 'final_zenith', 'final_azimuth',
-                       'final_x', 'final_y', 'final_z']
-        
+                        'final_x', 'final_y', 'final_z']
+        target_length = 2 if source_type.lower() == 'icecube' else 5
+
         for field in array_fields:
             if field in data:
                 arr = np.array(data[field])
-                # Pad or truncate to 5 elements
-                if len(arr) < 5:
-                    padded = np.zeros(5, dtype=arr.dtype)
+                # Pad or truncate to target length
+                if len(arr) < target_length:
+                    padded = np.zeros(target_length, dtype=arr.dtype)
                     padded[:len(arr)] = arr
                     record[field] = padded
                 else:
-                    record[field] = arr[:5]
-        
+                    record[field] = arr[:target_length]
+
         return record
 
 
@@ -234,10 +210,11 @@ def create_mmap_files_with_headers(output_path: str, num_events: int) -> Tuple[s
         dtype_bytes = pickle.dumps(EVENT_RECORD_DTYPE)
         f.write(struct.pack('<I', len(dtype_bytes)))  # Size of dtype
         f.write(dtype_bytes)                         # Dtype definition
-        
-        # Write placeholder data (will be filled by memory mapping)
-        placeholder = np.zeros(num_events, dtype=EVENT_RECORD_DTYPE)
-        f.write(placeholder.tobytes())
+
+        # Pre-size payload without materialising it in memory
+        payload_bytes = EVENT_RECORD_DTYPE.itemsize * num_events
+        if payload_bytes:
+            f.truncate(f.tell() + payload_bytes)
     
     # Create data file with header
     with open(dat_path, 'wb') as f:
@@ -279,10 +256,11 @@ def create_streaming_mmap_files(output_path: str, initial_events_estimate: int =
         dtype_bytes = pickle.dumps(event_dtype)
         f.write(struct.pack('<I', len(dtype_bytes)))  # Size of dtype
         f.write(dtype_bytes)                         # Dtype definition
-        
-        # Write initial placeholder data
-        placeholder = np.zeros(initial_events_estimate, dtype=event_dtype)
-        f.write(placeholder.tobytes())
+
+        # Pre-size payload without allocating in Python
+        payload_bytes = event_dtype.itemsize * initial_events_estimate
+        if payload_bytes:
+            f.truncate(f.tell() + payload_bytes)
     
     # Create data file with header only
     with open(dat_path, 'wb') as f:
@@ -368,13 +346,9 @@ class StreamingIndexWriter:
         # Close current mmap
         del self.mmap
         
-        # Extend the file
-        current_size = os.path.getsize(self.idx_path)
-        additional_bytes = (new_capacity - self.capacity) * self.event_record_size
-        
+        # Extend the file using truncate to avoid large temporary buffers
         with open(self.idx_path, 'r+b') as f:
-            f.seek(0, 2)  # Seek to end
-            f.write(b'\x00' * additional_bytes)
+            f.truncate(self.header_size + (new_capacity * self.event_record_size))
         
         # Create new memory map with larger capacity
         self.mmap = np.memmap(self.idx_path, dtype=self.event_dtype, mode='r+',

@@ -305,11 +305,7 @@ def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any]
     for file_path in parquet_files:
         print(f"Processing {os.path.basename(file_path)}...")
         
-        try:
-            df = pd.read_parquet(file_path)
-        except Exception as e:
-            print(f"Error reading {file_path}: {e}")
-            continue
+        df = pd.read_parquet(file_path)
         
         for idx in range(len(df)):
             # Extract mc_truth
@@ -343,12 +339,9 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     
     # Limit files if specified
     if file_range:
-        try:
-            start, end = map(int, file_range.split('-'))
-            parquet_files = parquet_files[start:end]
-            print(f"Processing files from index {start} to {end}")
-        except ValueError:
-            print(f"Invalid file range format: {file_range}. Processing all files.")
+        start, end = map(int, file_range.split('-'))
+        parquet_files = parquet_files[start:end]
+        print(f"Processing files from index {start} to {end}")
     
     print(f"Converting events from {len(parquet_files)} files using streaming approach...")
     

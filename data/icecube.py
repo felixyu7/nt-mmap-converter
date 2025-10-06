@@ -5,7 +5,7 @@ Handles conversion from i3 files to memory-mapped format.
 
 import os
 import glob
-from typing import List, Iterator, Tuple, Dict, Any
+from typing import List, Iterator, Tuple, Dict, Any, Optional, Set
 import icecube
 from icecube import dataio, dataclasses, icetray
 import numpy as np
@@ -62,28 +62,29 @@ def load_geometry(gcd_file: str) -> dataclasses.I3Geometry:
     i3_file.close()
     return g_frame["I3Geometry"]
 
-def iter_i3_events(i3_files: List[str]) -> Iterator[icetray.I3Frame]:
-    """
-    Iterate over all physics frames in IceCube i3 files,
-    handling empty/corrupt files safely.
-    """
+def iter_i3_events(i3_files: List[str],
+                   allowed_streams: Optional[Set[str]] = None) -> Iterator[icetray.I3Frame]:
+    """Iterate over physics frames, gating by sub-event stream if requested."""
     for path in i3_files:
         label = os.path.basename(path)
         print(f"Processing {label}...")
-        
-        i3_file = dataio.I3File(path)
 
+        i3_file = dataio.I3File(path)
         try:
             while i3_file.more():
-                try:
-                    frame = i3_file.pop_physics()
-                except Exception as e:
-                    print(f"Warning: stopping {label} due to read error: {e}")
-                    break
+                frame = i3_file.pop_physics()
+                if not frame or not frame.Has("I3EventHeader"):
+                    continue
 
-                if frame and frame.Has("I3EventHeader"):
-                    if frame["I3EventHeader"].sub_event_stream != "NullSplit":
-                        yield frame
+                stream = frame["I3EventHeader"].sub_event_stream
+
+                if allowed_streams is None:
+                    if stream == "NullSplit":
+                        continue
+                elif stream not in allowed_streams:
+                    continue
+
+                yield frame
         finally:
             i3_file.close()
 
@@ -118,7 +119,24 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
     
     all_x, all_y, all_z, all_t, all_charge, all_string_id, all_sensor_id, all_id_idx = [], [], [], [], [], [], [], []
     
-    for omkey, reco_pulses in pulses:
+    if hasattr(pulses, 'items'):
+        pulse_iter = pulses.items()
+    else:
+        pulse_iter = pulses
+
+    for entry in pulse_iter:
+        if isinstance(entry, tuple):
+            if not entry:
+                continue
+            omkey = entry[0]
+            reco_pulses = entry[1] if len(entry) > 1 else pulses[omkey]
+        else:
+            omkey = entry
+            if hasattr(pulses, '__getitem__'):
+                reco_pulses = pulses[omkey]
+            else:
+                continue
+        
         if omkey not in geometry.omgeo:
             continue
             
@@ -177,14 +195,14 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         'initial_type': _PDGMAP.get(primary.type),
     })
     
-    # Initialize final state arrays
-    final_energy = [0.0] * 5
-    final_type = [0] * 5
-    final_zenith = [0.0] * 5
-    final_azimuth = [0.0] * 5
-    final_x = [0.0] * 5
-    final_y = [0.0] * 5
-    final_z = [0.0] * 5
+    # Initialize final state arrays (lepton + hadrons)
+    final_energy = [0.0] * 2
+    final_type = [0] * 2
+    final_zenith = [0.0] * 2
+    final_azimuth = [0.0] * 2
+    final_x = [0.0] * 2
+    final_y = [0.0] * 2
+    final_z = [0.0] * 2
     
     # Look for final state particles
     lepton_types = {
@@ -213,92 +231,76 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
             final_hadrons = particle
 
     # Determine interaction type (CC/NC) using FIRST child of the primary
-    try:
-        def _ptype_name(pt):
-            name = getattr(pt, 'name', str(pt))
-            if '.' in name:
-                name = name.split('.')[-1]
-            return name
+    def _ptype_name(pt):
+        name = getattr(pt, 'name', str(pt))
+        if '.' in name:
+            name = name.split('.')[-1]
+        return name
 
-        def _neutrino_flavor(pt):
-            n = _ptype_name(pt)
-            if n.endswith('Bar'):
-                n = n[:-3]
-            return n if n in ('NuE', 'NuMu', 'NuTau') else None
-
-        def _lepton_family(pt):
-            n = _ptype_name(pt)
-            if n.startswith('E'):
-                return 'E'
-            if n.startswith('Mu'):
-                return 'Mu'
-            if n.startswith('Tau'):
-                return 'Tau'
-            return None
-
-        primary_flavor = _neutrino_flavor(primary.type)
-
-        # Attempt to get FIRST child of the primary from the MCTree
-        children = []
-        try:
-            if hasattr(mc_tree, 'children'):
-                children = list(mc_tree.children(primary))
-            elif hasattr(mc_tree, 'get_daughters'):
-                children = list(mc_tree.get_daughters(primary))
-        except Exception:
-            children = []
-
-        cc_nc = None
-        base_name = _ptype_name(primary.type)
-        # Strip 'Bar' for neutrinos only in the saved interaction
-        if base_name.endswith('Bar') and base_name.startswith('Nu'):
-            base_name = base_name[:-3]
-
-        first_child = children[0] if children else None
-        if primary_flavor is not None and first_child is not None:
-            fam = _lepton_family(first_child.type)
-            # CC if the first child is the corresponding charged lepton family
-            if ((primary_flavor == 'NuE' and fam == 'E') or
-                (primary_flavor == 'NuMu' and fam == 'Mu') or
-                (primary_flavor == 'NuTau' and fam == 'Tau')):
-                cc_nc = 'CC'
-            else:
-                # NC if the first child is an outgoing neutrino of the same flavor
-                child_flavor = _neutrino_flavor(first_child.type)
-                if child_flavor == primary_flavor:
-                    cc_nc = 'NC'
-
-        # Fallback: scan full tree if FIRST-child rule didn't decide
-        if cc_nc is None and primary_flavor is not None:
-            lepton_types = {
-                dataclasses.I3Particle.ParticleType.EMinus,
-                dataclasses.I3Particle.ParticleType.EPlus,
-                dataclasses.I3Particle.ParticleType.MuMinus,
-                dataclasses.I3Particle.ParticleType.MuPlus,
-                dataclasses.I3Particle.ParticleType.TauMinus,
-                dataclasses.I3Particle.ParticleType.TauPlus
-            }
-            # Any charged lepton anywhere -> CC
-            found_lepton = any((p.type in lepton_types) and (p.id != primary.id) for p in mc_tree)
-            if found_lepton:
-                cc_nc = 'CC'
-            else:
-                # Same-flavor neutrino anywhere -> NC
-                for p in mc_tree:
-                    if p.id == primary.id:
-                        continue
-                    if _neutrino_flavor(p.type) == primary_flavor:
-                        cc_nc = 'NC'
-                        break
-
-        interaction_str = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
-        parsed['interaction'] = interaction_str
-    except Exception:
-        # Never fail conversion due to interaction labeling
-        n = _ptype_name(primary.type)
-        if n.endswith('Bar') and n.startswith('Nu'):
+    def _neutrino_flavor(pt):
+        n = _ptype_name(pt)
+        if n.endswith('Bar'):
             n = n[:-3]
-        parsed['interaction'] = n
+        return n if n in ('NuE', 'NuMu', 'NuTau') else None
+
+    def _lepton_family(pt):
+        n = _ptype_name(pt)
+        if n.startswith('E'):
+            return 'E'
+        if n.startswith('Mu'):
+            return 'Mu'
+        if n.startswith('Tau'):
+            return 'Tau'
+        return None
+
+    primary_flavor = _neutrino_flavor(primary.type)
+
+    if hasattr(mc_tree, 'children'):
+        children = list(mc_tree.children(primary))
+    elif hasattr(mc_tree, 'get_daughters'):
+        children = list(mc_tree.get_daughters(primary))
+    else:
+        children = []
+
+    cc_nc = None
+    base_name = _ptype_name(primary.type)
+    if base_name.endswith('Bar') and base_name.startswith('Nu'):
+        base_name = base_name[:-3]
+
+    first_child = children[0] if children else None
+    if primary_flavor is not None and first_child is not None:
+        fam = _lepton_family(first_child.type)
+        if ((primary_flavor == 'NuE' and fam == 'E') or
+            (primary_flavor == 'NuMu' and fam == 'Mu') or
+            (primary_flavor == 'NuTau' and fam == 'Tau')):
+            cc_nc = 'CC'
+        else:
+            child_flavor = _neutrino_flavor(first_child.type)
+            if child_flavor == primary_flavor:
+                cc_nc = 'NC'
+
+    if cc_nc is None and primary_flavor is not None:
+        lepton_types = {
+            dataclasses.I3Particle.ParticleType.EMinus,
+            dataclasses.I3Particle.ParticleType.EPlus,
+            dataclasses.I3Particle.ParticleType.MuMinus,
+            dataclasses.I3Particle.ParticleType.MuPlus,
+            dataclasses.I3Particle.ParticleType.TauMinus,
+            dataclasses.I3Particle.ParticleType.TauPlus
+        }
+        found_lepton = any((p.type in lepton_types) and (p.id != primary.id) for p in mc_tree)
+        if found_lepton:
+            cc_nc = 'CC'
+        else:
+            for p in mc_tree:
+                if p.id == primary.id:
+                    continue
+                if _neutrino_flavor(p.type) == primary_flavor:
+                    cc_nc = 'NC'
+                    break
+
+    interaction_str = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
+    parsed['interaction'] = interaction_str
     
     # Store final lepton at index 0
     if final_lepton:
@@ -335,37 +337,34 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
-    # Initialize selected filter-pass booleans (condition AND prescale, exact matching)
-    selected_filters = {
-        "MuonFilter_13": "filter_muon_13",
-        "CascadeFilter_13": "filter_cascade_13",
-        "FSSFilter_13": "filter_fss_13",
-        "HESEFilter_15": "filter_hese_15",
-        "OnlineL2Filter_17": "filter_onlinel2_17",
-        "SunFilter_13": "filter_sun_13",
-    }
-    for _k, out_name in selected_filters.items():
-        parsed[out_name] = False
-
-    if "FilterMask" in frame:
-        filter_mask = frame["FilterMask"]
-        # Convert I3FilterResult map to dictionary (condition AND prescale)
-        filter_dict = {}
-        for filter_name, result in filter_mask:
-            cond = bool(getattr(result, 'condition_passed', False))
-            pres = bool(getattr(result, 'prescale_passed', False))
-            filter_dict[filter_name] = cond and pres
-        parsed['filter_mask'] = filter_dict
-
-        # Populate selected filter booleans from exact names (both must pass)
-        for in_name, out_name in selected_filters.items():
-            parsed[out_name] = bool(filter_dict.get(in_name, False))
-
     return parsed
 
+def frame_passes_filters(frame: icetray.I3Frame, filter_names: Optional[Set[str]]) -> bool:
+    """Return True if the frame passes at least one requested filter (condition only)."""
+    if not filter_names:
+        return True
+    if "FilterMask" not in frame:
+        return False
+
+    for filter_name, result in frame["FilterMask"].items():
+        if filter_name in filter_names and bool(getattr(result, 'condition_passed', False)):
+            return True
+    return False
+
+
 def convert_icecube_to_mmap(input_path: str, output_path: str,
-                               file_range: str = None, pulse_key: str = "SplitInIceDSTPulses") -> Tuple[int, int]:
-    """Convert IceCube i3 files to memory-mapped format using streaming approach."""
+                               file_range: str = None, pulse_key: str = "SplitInIceDSTPulses",
+                               filter_names: Optional[List[str]] = None,
+                               subevent_streams: Optional[List[str]] = None) -> Tuple[int, int]:
+    """Convert IceCube i3 files to memory-mapped format using streaming approach.
+
+    Args:
+        input_path: Directory containing i3/i3.zst files.
+        output_path: Base path for emitted mmap artifacts.
+        file_range: Optional "start-end" slice of discovered files.
+        pulse_key: Name of the pulse series to extract.
+        filter_names: Optional list of FilterMask names; keep events if any condition passes.
+    """
     
     # Find and filter input files
     i3_files = find_i3_files(input_path)
@@ -381,6 +380,19 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     geometry = load_geometry(gcd_file)
     
     print(f"Converting events from {len(i3_files)} files using streaming approach...")
+
+    filter_lookup: Optional[Set[str]] = None
+    if filter_names:
+        # Preserve user order for logging but use set for membership tests
+        ordered_filters = list(dict.fromkeys(filter_names))
+        print(f"Applying IceCube filter conditions: {', '.join(ordered_filters)}")
+        filter_lookup = set(ordered_filters)
+
+    stream_lookup: Optional[Set[str]] = None
+    if subevent_streams:
+        ordered_streams = list(dict.fromkeys(subevent_streams))
+        print(f"Limiting to sub-event streams: {', '.join(ordered_streams)}")
+        stream_lookup = set(ordered_streams)
     
     # Create streaming memory-mapped files
     from core.mmap_format import create_streaming_mmap_files, StreamingIndexWriter, append_photons_to_file
@@ -396,7 +408,10 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     total_photons = 0
     current_photon_idx = 0
     
-    for frame in iter_i3_events(i3_files):
+    for frame in iter_i3_events(i3_files, stream_lookup):
+        if not frame_passes_filters(frame, filter_lookup):
+            continue
+
         # Create event record from MC truth
         mc_truth = parse_mc_truth(frame)
         

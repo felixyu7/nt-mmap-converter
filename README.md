@@ -15,8 +15,12 @@ cd nt-mmap-converter
 # Prometheus parquet files
 python converter.py --source prometheus --input /path/to/parquet/files/ --output mydata
 
-# IceCube i3 files
+# IceCube i3 files (optional filter selection shown)
 python converter.py --source icecube --input /path/to/i3/files/ --output mydata
+python converter.py --source icecube --input /path/to/i3/files/ --output mydata \
+    --filters CascadeFilter_13 MuonFilter_13
+python converter.py --source icecube --input /path/to/i3/files/ --output mydata \
+    --subevent-streams InIceSplit
 
 # With hit grouping (time window in nanoseconds). highly recommend for prometheus datasets
 python converter.py --source prometheus --input /path/to/parquet/files/ --output mydata --grouping-window-ns 2.0
@@ -66,10 +70,9 @@ energy_mask = (events['initial_energy'] >= 1e3) & (events['initial_energy'] <= 1
 high_activity = events['num_chans'] >= 10
 filtered = events[energy_mask & high_activity]
 
-# IceCube FilterMask (vectorized)
-filter_names = events['filter_masks']['name'] 
-filter_passed = events['filter_masks']['passed']
-cascade_mask = np.any((filter_names == "CascadeFilter_13") & filter_passed, axis=1)
+# Interaction shorthand for IceCube datasets
+is_cc = np.char.find(events['interaction'], 'CC') >= 0
+cc_subset = events[is_cc]
 
 # Deterministic train/validation split in O(1)
 np.random.seed(42)
@@ -93,10 +96,7 @@ val_events = events[indices[int(0.8*n):]]
 
 **IceCube Events (+ above):**
 - `homogenized_qtot` - Total charge (when available)
- - `filter_results[50]` - FilterMask array with `name` and `passed` (condition AND prescale) fields
- - Selected filter booleans (both must pass, exact names):
-  - `filter_muon_13`, `filter_cascade_13`, `filter_fss_13`,
-    `filter_hese_15`, `filter_onlinel2_17`, `filter_sun_13`
+- `interaction` - Interaction label (e.g., `NuMu_CC`)
 - `final_*[0]` - Final state lepton, `final_*[1]` - Hadron shower
 
 **Photon Hits:**
@@ -110,4 +110,5 @@ val_events = events[indices[int(0.8*n):]]
 ```
 data.idx: [dtype_size][event_dtype][event_records...]
 data.dat: [dtype_size][photon_dtype][photon_data...]
+data.config.json: run metadata (CLI invocation, arguments, summary statistics)
 ```
