@@ -5,6 +5,7 @@ Handles conversion from i3 files to memory-mapped format.
 
 import glob
 import os
+from contextlib import closing
 from typing import List, Iterator, Tuple, Dict, Any, Optional, Set
 
 import icecube
@@ -41,6 +42,19 @@ def load_geometry(gcd_file: str) -> dataclasses.I3Geometry:
     i3_file.close()
     return g_frame["I3Geometry"]
 
+def _should_emit_frame(frame: icetray.I3Frame,
+                       allowed_streams: Optional[Set[str]]) -> bool:
+    if frame is None or frame.Stop != icetray.I3Frame.Physics:
+        return False
+    if not frame.Has("I3EventHeader"):
+        return False
+
+    stream = frame["I3EventHeader"].sub_event_stream
+    if allowed_streams is None:
+        return stream != "NullSplit"
+    return stream in allowed_streams
+
+
 def iter_i3_events(i3_files: List[str],
                    allowed_streams: Optional[Set[str]] = None) -> Iterator[icetray.I3Frame]:
     """Iterate over physics frames, gating by sub-event stream if requested."""
@@ -48,24 +62,10 @@ def iter_i3_events(i3_files: List[str],
         label = os.path.basename(path)
         print(f"Processing {label}...")
 
-        i3_file = dataio.I3File(path)
-        try:
-            while i3_file.more():
-                frame = i3_file.pop_physics()
-                if not frame or not frame.Has("I3EventHeader"):
-                    continue
-
-                stream = frame["I3EventHeader"].sub_event_stream
-
-                if allowed_streams is None:
-                    if stream == "NullSplit":
-                        continue
-                elif stream not in allowed_streams:
-                    continue
-
-                yield frame
-        finally:
-            i3_file.close()
+        with closing(dataio.I3File(path)) as i3_file:
+            for frame in i3_file:
+                if _should_emit_frame(frame, allowed_streams):
+                    yield frame
 
 def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I3Geometry) -> Dict[str, np.ndarray]:
     """Parse pulse data from an I3Frame."""
