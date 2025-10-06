@@ -74,7 +74,7 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
             'sensor_pos_x': np.array([]), 'sensor_pos_y': np.array([]),
             'sensor_pos_z': np.array([]), 't': np.array([]),
             'charge': np.array([]), 'string_id': np.array([]),
-            'sensor_id': np.array([]), 'id_idx': np.array([])
+            'sensor_id': np.array([])
         }
 
     pulses = frame[pulse_key]
@@ -93,10 +93,10 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
             'sensor_pos_x': np.array([]), 'sensor_pos_y': np.array([]),
             'sensor_pos_z': np.array([]), 't': np.array([]),
             'charge': np.array([]), 'string_id': np.array([]),
-            'sensor_id': np.array([]), 'id_idx': np.array([])
+            'sensor_id': np.array([])
         }
     
-    all_x, all_y, all_z, all_t, all_charge, all_string_id, all_sensor_id, all_id_idx = [], [], [], [], [], [], [], []
+    all_x, all_y, all_z, all_t, all_charge, all_string_id, all_sensor_id = [], [], [], [], [], [], []
     
     if hasattr(pulses, 'items'):
         pulse_iter = pulses.items()
@@ -132,7 +132,6 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
             all_charge.append(pulse.charge)
             all_string_id.append(string_id)
             all_sensor_id.append(sensor_id)
-            all_id_idx.append(0)
             
     return {
         'sensor_pos_x': np.array(all_x, dtype=np.float32),
@@ -142,7 +141,6 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
         'charge': np.array(all_charge, dtype=np.float32),
         'string_id': np.array(all_string_id, dtype=np.uint32),
         'sensor_id': np.array(all_sensor_id, dtype=np.uint32),
-        'id_idx': np.array(all_id_idx, dtype=np.uint64),
     }
 
 

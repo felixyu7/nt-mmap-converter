@@ -72,9 +72,6 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     ('final_z', np.float32, (2,)),
 ])
 
-# Keep EVENT_RECORD_DTYPE as alias for backward compatibility
-EVENT_RECORD_DTYPE = PROMETHEUS_EVENT_RECORD_DTYPE
-
 # Define the photon hit structure  
 PHOTON_HIT_DTYPE = np.dtype([
     ('x', np.float32),
@@ -82,15 +79,13 @@ PHOTON_HIT_DTYPE = np.dtype([
     ('z', np.float32),
     ('t', np.float32),
     ('charge', np.float32),
-    ('string_id', np.uint32),
-    ('sensor_id', np.uint32),
-    ('id_idx', np.uint64),
+    ('string_id', np.uint16),
+    ('sensor_id', np.uint16),
 ])
 
 # Size constants
 PROMETHEUS_EVENT_RECORD_SIZE = PROMETHEUS_EVENT_RECORD_DTYPE.itemsize
 ICECUBE_EVENT_RECORD_SIZE = ICECUBE_EVENT_RECORD_DTYPE.itemsize
-EVENT_RECORD_SIZE = PROMETHEUS_EVENT_RECORD_SIZE  # Backward compatibility
 PHOTON_HIT_SIZE = PHOTON_HIT_DTYPE.itemsize
 
 
@@ -179,7 +174,6 @@ class PhotonHit:
             
         photons['string_id'] = data['string_id'].astype(np.uint32)
         photons['sensor_id'] = data['sensor_id'].astype(np.uint32)
-        photons['id_idx'] = data['id_idx'].astype(np.uint64)
         
         return photons
 

@@ -165,7 +165,6 @@ def parse_photons(photons_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         't': photons_dict['t'],
         'string_id': photons_dict['string_id'],
         'sensor_id': photons_dict['sensor_id'],
-        'id_idx': photons_dict['id_idx'],
     }
 
 
@@ -216,7 +215,6 @@ def process_photons_with_grouping(photons_dict: Dict[str, np.ndarray],
     all_sensor_pos_z = np.empty(estimated_grouped, dtype=np.float32)
     all_string_ids = np.empty(estimated_grouped, dtype=np.uint32)
     all_sensor_ids = np.empty(estimated_grouped, dtype=np.uint32)
-    all_id_idx = np.empty(estimated_grouped, dtype=np.uint64)
     
     result_idx = 0
     
@@ -261,7 +259,6 @@ def process_photons_with_grouping(photons_dict: Dict[str, np.ndarray],
             all_sensor_pos_z = np.resize(all_sensor_pos_z, new_size)
             all_string_ids = np.resize(all_string_ids, new_size)
             all_sensor_ids = np.resize(all_sensor_ids, new_size)
-            all_id_idx = np.resize(all_id_idx, new_size)
         
         # Copy data efficiently using array slicing
         end_result_idx = result_idx + n_grouped
@@ -272,7 +269,6 @@ def process_photons_with_grouping(photons_dict: Dict[str, np.ndarray],
         all_sensor_pos_z[result_idx:end_result_idx] = photons_dict['sensor_pos_z'][first_original_idx]
         all_string_ids[result_idx:end_result_idx] = string_id
         all_sensor_ids[result_idx:end_result_idx] = sensor_id
-        all_id_idx[result_idx:end_result_idx] = photons_dict['id_idx'][first_original_idx]
         
         result_idx = end_result_idx
     
@@ -285,7 +281,6 @@ def process_photons_with_grouping(photons_dict: Dict[str, np.ndarray],
         'charge': all_charges[:result_idx].copy(),
         'string_id': all_string_ids[:result_idx].copy(),
         'sensor_id': all_sensor_ids[:result_idx].copy(),
-        'id_idx': all_id_idx[:result_idx].copy(),
     }
 
 
