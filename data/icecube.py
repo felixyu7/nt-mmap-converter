@@ -13,27 +13,6 @@ from icecube import dataio, dataclasses, icetray
 
 from core.mmap_format import EventRecord, PhotonHit
 
-
-_PDGMAP = {
-    dataclasses.I3Particle.ParticleType.Gamma: 22,
-    dataclasses.I3Particle.ParticleType.EPlus: -11,
-    dataclasses.I3Particle.ParticleType.EMinus: 11,
-    dataclasses.I3Particle.ParticleType.MuPlus: -13,
-    dataclasses.I3Particle.ParticleType.MuMinus: 13,
-    dataclasses.I3Particle.ParticleType.TauPlus: -15,
-    dataclasses.I3Particle.ParticleType.TauMinus: 15,
-    dataclasses.I3Particle.ParticleType.NuE: 12,
-    dataclasses.I3Particle.ParticleType.NuEBar: -12,
-    dataclasses.I3Particle.ParticleType.NuMu: 14,
-    dataclasses.I3Particle.ParticleType.NuMuBar: -14,
-    dataclasses.I3Particle.ParticleType.NuTau: 16,
-    dataclasses.I3Particle.ParticleType.NuTauBar: -16,
-    dataclasses.I3Particle.ParticleType.Pi0: 111,
-    dataclasses.I3Particle.ParticleType.PiPlus: 211,
-    dataclasses.I3Particle.ParticleType.PiMinus: -211,
-    dataclasses.I3Particle.ParticleType.Hadrons: 99  # Special IceCube hadron shower
-}
-
 def find_i3_files(input_path: str) -> List[str]:
     """Find all i3 files (including .i3.zst) in the input directory."""
     if not os.path.isdir(input_path):
@@ -169,160 +148,126 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
 
 def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
-    parsed = {}
-    
-    # Try to get MC truth from I3MCTree_preMuonProp first (preferred for hadrons)
-    mc_tree_key = "I3MCTree_preMuonProp" if "I3MCTree_preMuonProp" in frame else "I3MCTree"
-    
-    if mc_tree_key not in frame:
+    mc_tree = None
+    if "I3MCTree_preMuonProp" in frame:
+        mc_tree = frame["I3MCTree_preMuonProp"]
+    elif "I3MCTree" in frame:
+        mc_tree = frame["I3MCTree"]
+
+    tree_primary = None
+    if mc_tree and hasattr(mc_tree, "primaries") and mc_tree.primaries:
+        tree_primary = mc_tree.primaries[0]
+
+    primary = frame["PolyplopiaPrimary"] if "PolyplopiaPrimary" in frame else tree_primary
+    if primary is None:
         return {}
 
-    mc_tree = frame[mc_tree_key]
-    
-    if not hasattr(mc_tree, 'primaries') or len(mc_tree.primaries) == 0:
-        return {}
-    
-    primary = mc_tree.primaries[0]
-    
-    # Fill basic MC truth
-    parsed.update({
+    parsed = {
         'initial_energy': primary.energy,
         'initial_zenith': primary.dir.zenith,
         'initial_azimuth': primary.dir.azimuth,
         'initial_x': primary.pos.x,
         'initial_y': primary.pos.y,
         'initial_z': primary.pos.z,
-        'initial_type': _PDGMAP.get(primary.type),
-    })
-    
-    # Initialize final state arrays (lepton + hadrons)
-    final_energy = [0.0] * 2
-    final_type = [0] * 2
-    final_zenith = [0.0] * 2
-    final_azimuth = [0.0] * 2
-    final_x = [0.0] * 2
-    final_y = [0.0] * 2
-    final_z = [0.0] * 2
-    
-    # Look for final state particles
-    lepton_types = {
-        dataclasses.I3Particle.ParticleType.EMinus,
-        dataclasses.I3Particle.ParticleType.EPlus,
-        dataclasses.I3Particle.ParticleType.MuMinus,
-        dataclasses.I3Particle.ParticleType.MuPlus,
-        dataclasses.I3Particle.ParticleType.TauMinus,
-        dataclasses.I3Particle.ParticleType.TauPlus
+        'initial_type': int(getattr(primary, "pdg_encoding", 0) or 0),
     }
-    
+
+    final_energy = [0.0, 0.0]
+    final_type = [0, 0]
+    final_zenith = [0.0, 0.0]
+    final_azimuth = [0.0, 0.0]
+    final_x = [0.0, 0.0]
+    final_y = [0.0, 0.0]
+    final_z = [0.0, 0.0]
+
+    lepton_codes = {11, 13, 15}
     final_lepton = None
     final_hadrons = None
-    
-    for particle in mc_tree:
-        # Skip primary
-        if particle.id == primary.id:
-            continue
-            
-        # Look for final state lepton
-        if particle.type in lepton_types and final_lepton is None:
-            final_lepton = particle
-            
-        # Look for hadrons (special IceCube particle type)
-        if particle.type == dataclasses.I3Particle.ParticleType.Hadrons and final_hadrons is None:
-            final_hadrons = particle
 
-    # Determine interaction type (CC/NC) using FIRST child of the primary
-    def _ptype_name(pt):
-        name = getattr(pt, 'name', str(pt))
-        if '.' in name:
-            name = name.split('.')[-1]
-        return name
+    skip_id = None
+    if tree_primary is not None and hasattr(tree_primary, "id"):
+        skip_id = tree_primary.id
+    elif hasattr(primary, "id"):
+        skip_id = primary.id
 
-    def _neutrino_flavor(pt):
-        n = _ptype_name(pt)
-        if n.endswith('Bar'):
-            n = n[:-3]
-        return n if n in ('NuE', 'NuMu', 'NuTau') else None
+    if mc_tree:
+        for particle in mc_tree:
+            if skip_id is not None and getattr(particle, "id", None) == skip_id:
+                continue
+            pdg_code = int(getattr(particle, "pdg_encoding", 0) or 0)
+            if final_lepton is None and abs(pdg_code) in lepton_codes:
+                final_lepton = particle
+            if final_hadrons is None and particle.type == dataclasses.I3Particle.ParticleType.Hadrons:
+                final_hadrons = particle
 
-    def _lepton_family(pt):
-        n = _ptype_name(pt)
-        if n.startswith('E'):
-            return 'E'
-        if n.startswith('Mu'):
-            return 'Mu'
-        if n.startswith('Tau'):
-            return 'Tau'
-        return None
+    def neutrino_flavor(pdg_code: int) -> Optional[str]:
+        return {12: 'NuE', 14: 'NuMu', 16: 'NuTau'}.get(abs(pdg_code))
 
-    primary_flavor = _neutrino_flavor(primary.type)
+    def charged_lepton_family(pdg_code: int) -> Optional[str]:
+        return {11: 'E', 13: 'Mu', 15: 'Tau'}.get(abs(pdg_code))
 
-    if hasattr(mc_tree, 'children'):
-        children = list(mc_tree.children(primary))
-    elif hasattr(mc_tree, 'get_daughters'):
-        children = list(mc_tree.get_daughters(primary))
-    else:
-        children = []
+    primary_pdg = int(getattr(primary, "pdg_encoding", 0) or 0)
+    primary_flavor = neutrino_flavor(primary_pdg)
+
+    children: List[dataclasses.I3Particle] = []
+    if mc_tree and tree_primary:
+        if hasattr(mc_tree, "children"):
+            children = list(mc_tree.children(tree_primary))
+        elif hasattr(mc_tree, "get_daughters"):
+            children = list(mc_tree.get_daughters(tree_primary))
 
     cc_nc = None
-    base_name = _ptype_name(primary.type)
+    base_name = primary.type.name if hasattr(primary.type, "name") else str(primary.type)
     if base_name.endswith('Bar') and base_name.startswith('Nu'):
         base_name = base_name[:-3]
 
     first_child = children[0] if children else None
-    if primary_flavor is not None and first_child is not None:
-        fam = _lepton_family(first_child.type)
-        if ((primary_flavor == 'NuE' and fam == 'E') or
-            (primary_flavor == 'NuMu' and fam == 'Mu') or
-            (primary_flavor == 'NuTau' and fam == 'Tau')):
+    if primary_flavor and first_child is not None:
+        child_pdg = int(getattr(first_child, "pdg_encoding", 0) or 0)
+        family = charged_lepton_family(child_pdg)
+        expected_family = primary_flavor.replace('Nu', '')
+        if family and family == expected_family:
             cc_nc = 'CC'
-        else:
-            child_flavor = _neutrino_flavor(first_child.type)
-            if child_flavor == primary_flavor:
-                cc_nc = 'NC'
+        elif neutrino_flavor(child_pdg) == primary_flavor:
+            cc_nc = 'NC'
 
-    if cc_nc is None and primary_flavor is not None:
-        lepton_types = {
-            dataclasses.I3Particle.ParticleType.EMinus,
-            dataclasses.I3Particle.ParticleType.EPlus,
-            dataclasses.I3Particle.ParticleType.MuMinus,
-            dataclasses.I3Particle.ParticleType.MuPlus,
-            dataclasses.I3Particle.ParticleType.TauMinus,
-            dataclasses.I3Particle.ParticleType.TauPlus
-        }
-        found_lepton = any((p.type in lepton_types) and (p.id != primary.id) for p in mc_tree)
+    if cc_nc is None and primary_flavor and mc_tree:
+        found_lepton = any(
+            abs(int(getattr(p, "pdg_encoding", 0) or 0)) in lepton_codes
+            and (skip_id is None or getattr(p, "id", None) != skip_id)
+            for p in mc_tree
+        )
         if found_lepton:
             cc_nc = 'CC'
         else:
             for p in mc_tree:
-                if p.id == primary.id:
+                if skip_id is not None and getattr(p, "id", None) == skip_id:
                     continue
-                if _neutrino_flavor(p.type) == primary_flavor:
+                if neutrino_flavor(int(getattr(p, "pdg_encoding", 0) or 0)) == primary_flavor:
                     cc_nc = 'NC'
                     break
 
-    interaction_str = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
-    parsed['interaction'] = interaction_str
-    
-    # Store final lepton at index 0
+    interaction = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
+    parsed['interaction'] = interaction
+
     if final_lepton:
         final_energy[0] = final_lepton.energy
-        final_type[0] = _PDGMAP.get(final_lepton.type, 0)
+        final_type[0] = int(getattr(final_lepton, "pdg_encoding", 0) or 0)
         final_zenith[0] = final_lepton.dir.zenith
         final_azimuth[0] = final_lepton.dir.azimuth
         final_x[0] = final_lepton.pos.x
         final_y[0] = final_lepton.pos.y
         final_z[0] = final_lepton.pos.z
-    
-    # Store hadrons at index 1
+
     if final_hadrons:
         final_energy[1] = final_hadrons.energy
-        final_type[1] = _PDGMAP.get(final_hadrons.type, 0)
+        final_type[1] = int(getattr(final_hadrons, "pdg_encoding", 0) or 0)
         final_zenith[1] = final_hadrons.dir.zenith
         final_azimuth[1] = final_hadrons.dir.azimuth
         final_x[1] = final_hadrons.pos.x
         final_y[1] = final_hadrons.pos.y
         final_z[1] = final_hadrons.pos.z
-    
-    # Add final state arrays to parsed data
+
     parsed.update({
         'final_energy': final_energy,
         'final_type': final_type,
@@ -332,8 +277,7 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
         'final_y': final_y,
         'final_z': final_z,
     })
-    
-    # Add IceCube-specific fields
+
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
