@@ -49,6 +49,35 @@ def write_run_config(output_base: str, args: argparse.Namespace, num_events: int
     return config_path
 
 
+def print_conversion_summary(output_base: str, num_events: int,
+                             total_photons: int, elapsed_seconds: float,
+                             include_dataset_info: bool) -> None:
+    """Display conversion throughput, file sizes, and optional dataset stats."""
+    print(f"\n=== Conversion Summary ===")
+    print(f"Events converted: {num_events:,}")
+    print(f"Total photons: {total_photons:,}")
+    print(f"Time elapsed: {elapsed_seconds:.1f} seconds")
+    if elapsed_seconds > 0:
+        print(f"Events/sec: {num_events / elapsed_seconds:.1f}")
+        print(f"Photons/sec: {total_photons / elapsed_seconds:,.0f}")
+
+    idx_path = f"{output_base}.idx"
+    dat_path = f"{output_base}.dat"
+
+    if os.path.exists(idx_path) and os.path.exists(dat_path):
+        idx_size = os.path.getsize(idx_path) / (1024 * 1024)  # MB
+        dat_size = os.path.getsize(dat_path) / (1024 * 1024)  # MB
+        total_size = idx_size + dat_size
+
+        print(f"\nOutput files:")
+        print(f"  Index: {idx_size:.1f} MB ({idx_path})")
+        print(f"  Data: {dat_size:.1f} MB ({dat_path})")
+        print(f"  Total: {total_size:.1f} MB")
+
+    if include_dataset_info:
+        print_dataset_info(output_base)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert neutrino telescope data to memory-mapped format",
@@ -91,12 +120,6 @@ def main():
         "--info",
         action="store_true", 
         help="Print dataset statistics after conversion"
-    )
-    
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose output"
     )
     
     parser.add_argument(
@@ -169,33 +192,11 @@ def main():
     
     # Conversion complete
     elapsed = time.time() - start_time
-    
-    print(f"\n=== Conversion Summary ===")
-    print(f"Events converted: {num_events:,}")
-    print(f"Total photons: {total_photons:,}")
-    print(f"Time elapsed: {elapsed:.1f} seconds")
-    print(f"Events/sec: {num_events / elapsed:.1f}")
-    print(f"Photons/sec: {total_photons / elapsed:,.0f}")
-    
-    # Get file sizes
-    idx_path = f"{args.output}.idx"
-    dat_path = f"{args.output}.dat"
-    
-    if os.path.exists(idx_path) and os.path.exists(dat_path):
-        idx_size = os.path.getsize(idx_path) / (1024 * 1024)  # MB
-        dat_size = os.path.getsize(dat_path) / (1024 * 1024)  # MB
-        total_size = idx_size + dat_size
-        
-        print(f"\nOutput files:")
-        print(f"  Index: {idx_size:.1f} MB ({idx_path})")
-        print(f"  Data: {dat_size:.1f} MB ({dat_path})")
-        print(f"  Total: {total_size:.1f} MB")
-    
-    
-    # Dataset info
-    if args.info:
-        print_dataset_info(args.output)
-    
+
+    print_conversion_summary(
+        args.output, num_events, total_photons, elapsed, args.info
+    )
+
     config_path = write_run_config(args.output, args, num_events, total_photons, elapsed)
 
     print(f"\n✓ Conversion completed successfully!")

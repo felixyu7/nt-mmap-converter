@@ -3,14 +3,14 @@ IceCube neutrino telescope data parser.
 Handles conversion from i3 files to memory-mapped format.
 """
 
-import os
 import glob
+import os
 from typing import List, Iterator, Tuple, Dict, Any, Optional, Set
+
 import icecube
-from icecube import dataio, dataclasses, icetray
 import numpy as np
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from icecube import dataio, dataclasses, icetray
+
 from core.mmap_format import EventRecord, PhotonHit
 
 

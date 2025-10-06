@@ -3,14 +3,13 @@ Prometheus neutrino telescope data parser.
 Handles conversion from parquet files to memory-mapped format.
 """
 
-import pandas as pd
-import numpy as np
-import os
 import glob
-from typing import Iterator, Tuple, Dict, Any
-import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from typing import Iterator, Tuple, Dict, Any
+
+import numpy as np
+import pandas as pd
+
 from core.mmap_format import EventRecord, PhotonHit
 
 def group_hits_by_window(hit_times, hit_charges, time_window, return_counts=False):
