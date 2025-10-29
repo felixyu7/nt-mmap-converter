@@ -10,9 +10,169 @@ from typing import List, Iterator, Tuple, Dict, Any, Optional, Set
 
 import icecube
 import numpy as np
-from icecube import dataio, dataclasses, icetray
+from icecube import dataio, dataclasses, icetray, phys_services
 
 from core.mmap_format import EventRecord, PhotonHit
+
+NEUTRINO_PDGS = {12, -12, 14, -14, 16, -16}
+
+
+def _get_children(mc_tree: "dataclasses.I3MCTree",
+                  particle: dataclasses.I3Particle) -> List[dataclasses.I3Particle]:
+    if hasattr(mc_tree, "children"):
+        return list(mc_tree.children(particle))
+    if hasattr(mc_tree, "get_daughters"):
+        return list(mc_tree.get_daughters(particle))
+    return []
+
+
+def _get_parent(mc_tree: "dataclasses.I3MCTree",
+                particle: dataclasses.I3Particle) -> Optional[dataclasses.I3Particle]:
+    if hasattr(mc_tree, "parent"):
+        return mc_tree.parent(particle)
+    if hasattr(mc_tree, "get_parent"):
+        return mc_tree.get_parent(particle)
+    return None
+
+
+def _safe_intersection(surface: phys_services.ExtrudedPolygon,
+                       position: dataclasses.I3Position,
+                       direction: dataclasses.I3Direction) -> Optional[Tuple[float, float]]:
+    try:
+        result = surface.intersection(position, direction)
+    except RuntimeError:
+        return None
+
+    first, second = float(result.first), float(result.second)
+    if not (np.isfinite(first) and np.isfinite(second)):
+        return None
+    return first, second
+
+
+def _is_track(particle: dataclasses.I3Particle) -> bool:
+    return bool(getattr(particle, "is_track", False))
+
+
+def _is_cascade(particle: dataclasses.I3Particle) -> bool:
+    return bool(getattr(particle, "is_cascade", False))
+
+
+def _has_signature(particle: dataclasses.I3Particle,
+                   surface: phys_services.ExtrudedPolygon) -> int:
+    if getattr(particle, "is_neutrino", False):
+        return -1
+
+    pos = getattr(particle, "pos", None)
+    direction = getattr(particle, "dir", None)
+    if pos is None or direction is None:
+        return -1
+
+    intersection = _safe_intersection(surface, pos, direction)
+    if intersection is None:
+        return -1
+
+    first, second = intersection
+    length = float(getattr(particle, "length", np.nan))
+
+    if _is_cascade(particle):
+        return 0 if first <= 0.0 and second > 0.0 else -1
+
+    if _is_track(particle):
+        if first <= 0.0 and second > 0.0:
+            return 0
+        if first > 0.0 and second > 0.0:
+            if np.isfinite(length) and length <= first:
+                return -1
+            if (np.isfinite(length) and length > second) or not np.isfinite(length):
+                return 1
+            return 2
+
+    return -1
+
+
+def _find_particle(candidate: dataclasses.I3Particle,
+                   mc_tree: "dataclasses.I3MCTree",
+                   surface: phys_services.ExtrudedPolygon) -> List[dataclasses.I3Particle]:
+    children = _get_children(mc_tree, candidate)
+    if len(children) > 3:
+        return []
+
+    interacts_in_detector = any(
+        (_has_signature(child, surface) != -1) and np.isfinite(getattr(child, "length", np.nan))
+        for child in children
+    )
+    if interacts_in_detector:
+        pdg_code = int(getattr(candidate, "pdg_encoding", 0) or 0)
+        if abs(pdg_code) not in NEUTRINO_PDGS and not getattr(candidate, "is_neutrino", False):
+            parent = _get_parent(mc_tree, candidate)
+            return [parent] if parent is not None else []
+        return [candidate]
+
+    if len(children) < 3:
+        found: List[dataclasses.I3Particle] = []
+        for child in children:
+            found.extend(_find_particle(child, mc_tree, surface))
+        return found
+
+    return []
+
+
+def _locate_interaction_neutrino(mc_tree: Optional["dataclasses.I3MCTree"],
+                                 surface: Optional[phys_services.ExtrudedPolygon]) -> Optional[dataclasses.I3Particle]:
+    if mc_tree is None or surface is None:
+        return None
+
+    if hasattr(mc_tree, "primaries") and mc_tree.primaries:
+        primaries = list(mc_tree.primaries)
+    elif hasattr(mc_tree, "get_primaries"):
+        primaries = list(mc_tree.get_primaries())
+    else:
+        primaries = [p for p in mc_tree]
+
+    seed = None
+    for particle in primaries:
+        pdg_code = int(getattr(particle, "pdg_encoding", 0) or 0)
+        if abs(pdg_code) in NEUTRINO_PDGS or getattr(particle, "is_neutrino", False):
+            seed = particle
+            break
+
+    if seed is None and primaries:
+        seed = primaries[0]
+
+    if seed is None:
+        return None
+
+    found = _find_particle(seed, mc_tree, surface)
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+def compute_starting_flag(mc_tree: Optional["dataclasses.I3MCTree"],
+                          surface: Optional[phys_services.ExtrudedPolygon]) -> bool:
+    """Return True when the neutrino interaction point is inside the detector volume."""
+    neutrino = _locate_interaction_neutrino(mc_tree, surface)
+    if neutrino is None or surface is None:
+        return False
+
+    length = float(getattr(neutrino, "length", np.nan))
+    base_pos = neutrino.pos
+    if np.isfinite(length):
+        direction = neutrino.dir
+        interaction_pos = dataclasses.I3Position(
+            base_pos.x + length * direction.x,
+            base_pos.y + length * direction.y,
+            base_pos.z + length * direction.z,
+        )
+    else:
+        interaction_pos = base_pos
+
+    intersection = _safe_intersection(surface, interaction_pos, neutrino.dir)
+    if intersection is None:
+        return False
+
+    first, second = intersection
+    return first <= 0.0 and second > 0.0
 
 def find_i3_files(input_path: str) -> List[str]:
     """Find all i3 files (including .i3.zst) in the input directory."""
@@ -144,13 +304,14 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
     }
 
 
-def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
+def parse_mc_truth(frame: icetray.I3Frame,
+                   surface: Optional[phys_services.ExtrudedPolygon] = None) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
     mc_tree = None
-    if "I3MCTree_preMuonProp" in frame:
-        mc_tree = frame["I3MCTree_preMuonProp"]
-    elif "I3MCTree" in frame:
+    if "I3MCTree" in frame:
         mc_tree = frame["I3MCTree"]
+    elif "I3MCTree_preMuonProp" in frame:
+        mc_tree = frame["I3MCTree_preMuonProp"]
 
     tree_primary = None
     if mc_tree and hasattr(mc_tree, "primaries") and mc_tree.primaries:
@@ -279,6 +440,8 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
+    parsed['starting'] = compute_starting_flag(mc_tree, surface)
+
     return parsed
 
 def frame_passes_filters(frame: icetray.I3Frame, filter_names: Optional[Set[str]]) -> bool:
@@ -320,6 +483,7 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     # Load geometry
     gcd_file = os.path.join(os.path.dirname(__file__), '..', 'resources', 'GeoCalibDetectorStatus_IC86.AVG_Pass2_SF0.99.i3')
     geometry = load_geometry(gcd_file)
+    detector_surface = phys_services.ExtrudedPolygon(geometry, 0.0)
     
     print(f"Converting events from {len(i3_files)} files using streaming approach...")
 
@@ -355,7 +519,7 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
             continue
 
         # Create event record from MC truth
-        mc_truth = parse_mc_truth(frame)
+        mc_truth = parse_mc_truth(frame, detector_surface)
         
         # Process photons
         photons = parse_pulses(frame, pulse_key, geometry)
