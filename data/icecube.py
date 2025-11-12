@@ -216,8 +216,8 @@ def _should_emit_frame(frame: icetray.I3Frame,
 
 
 def iter_i3_events(i3_files: List[str],
-                   allowed_streams: Optional[Set[str]] = None) -> Iterator[icetray.I3Frame]:
-    """Iterate over physics frames, gating by sub-event stream if requested."""
+                   allowed_streams: Optional[Set[str]] = None) -> Iterator[Tuple[icetray.I3Frame, str]]:
+    """Iterate over physics frames, yielding each frame with its source file path."""
     for path in i3_files:
         label = os.path.basename(path)
         print(f"Processing {label}...")
@@ -225,7 +225,7 @@ def iter_i3_events(i3_files: List[str],
         with closing(dataio.I3File(path)) as i3_file:
             for frame in i3_file:
                 if _should_emit_frame(frame, allowed_streams):
-                    yield frame
+                    yield frame, path
 
 def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I3Geometry) -> Dict[str, np.ndarray]:
     """Parse pulse data from an I3Frame."""
@@ -305,7 +305,8 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
 
 
 def parse_mc_truth(frame: icetray.I3Frame,
-                   surface: Optional[phys_services.ExtrudedPolygon] = None) -> Dict[str, Any]:
+                   surface: Optional[phys_services.ExtrudedPolygon] = None,
+                   skip_starting_flag: bool = False) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
     mc_tree = None
     if "I3MCTree" in frame:
@@ -440,7 +441,10 @@ def parse_mc_truth(frame: icetray.I3Frame,
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
-    parsed['starting'] = compute_starting_flag(mc_tree, surface)
+    if skip_starting_flag:
+        parsed['starting'] = False
+    else:
+        parsed['starting'] = compute_starting_flag(mc_tree, surface)
 
     return parsed
 
@@ -514,12 +518,13 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     total_photons = 0
     current_photon_idx = 0
     
-    for frame in iter_i3_events(i3_files, stream_lookup):
+    for frame, source_path in iter_i3_events(i3_files, stream_lookup):
         if not frame_passes_filters(frame, filter_lookup):
             continue
 
         # Create event record from MC truth
-        mc_truth = parse_mc_truth(frame, detector_surface)
+        skip_starting_label = "corsika" in os.path.basename(source_path).lower()
+        mc_truth = parse_mc_truth(frame, detector_surface, skip_starting_flag=skip_starting_label)
         
         # Process photons
         photons = parse_pulses(frame, pulse_key, geometry)
