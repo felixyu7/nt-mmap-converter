@@ -5,7 +5,7 @@ Convert neutrino telescope data (Prometheus, IceCube) into efficient memory-mapp
 ### Install
 
 ```bash
-git clone https://github.com/yourname/nt-mmap-converter
+git clone https://github.com/felixyu7/nt-mmap-converter
 cd nt-mmap-converter
 ```
 
