@@ -70,9 +70,9 @@ energy_mask = (events['initial_energy'] >= 1e3) & (events['initial_energy'] <= 1
 high_activity = events['num_chans'] >= 10
 filtered = events[energy_mask & high_activity]
 
-# Interaction shorthand for IceCube datasets
-is_cc = np.char.find(events['interaction'], 'CC') >= 0
-cc_subset = events[is_cc]
+# Morphology shorthand for IceCube datasets
+is_track_like = np.isin(events['morphology'], [1, 2, 3, 4])
+track_subset = events[is_track_like]
 
 # Deterministic train/validation split in O(1)
 np.random.seed(42)
@@ -92,11 +92,30 @@ val_events = events[indices[int(0.8*n):]]
 - `initial_energy`, `initial_zenith`, `initial_azimuth` - Primary particle
 - `initial_x`, `initial_y`, `initial_z` - Interaction vertex  
 - `bjorken_x`, `bjorken_y`, `column_depth` - Physics variables
+- `interaction` - Generator-specific interaction code
 - `final_energy[5]`, `final_type[5]`, `final_x[5]`, `final_y[5]`, `final_z[5]` - Final state particles
 
 **IceCube Events (+ above):**
 - `homogenized_qtot` - Total charge (when available)
-- `interaction` - Interaction label (e.g., `NuMu_CC`)
+- `event_class` - Detailed classification
+  - 0 outside cascade
+  - 1 contained cascade
+  - 2 through-going track
+  - 3 starting track
+  - 4 stopping track
+  - 5 double bang
+  - 6 stopping tau
+  - 7 Glashow cascade
+  - 8 Glashow track
+  - 9 Glashow tau
+  - 10 stop-start track (reserved)
+  - 11 passing track
+  - 12 uncontained tau
+  - 21 multiple coincident events
+  - 22 through-going bundle
+  - 23 stopping bundle
+  - 100/101 unknown
+- `morphology` - Simplified label (0=cascade, 1=through-going track, 2=starting track, 3=stopping track, 4=passing track, 5=bundle/other)
 - `final_*[0]` - Final state lepton, `final_*[1]` - Hadron shower
 
 **Photon Hits:**

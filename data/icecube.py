@@ -15,6 +15,47 @@ from icecube import dataio, dataclasses, icetray, phys_services
 from core.mmap_format import EventRecord, PhotonHit
 
 NEUTRINO_PDGS = {12, -12, 14, -14, 16, -16}
+NEUTRINO_TYPES = {
+    dataclasses.I3Particle.ParticleType.NuE,
+    dataclasses.I3Particle.ParticleType.NuEBar,
+    dataclasses.I3Particle.ParticleType.NuMu,
+    dataclasses.I3Particle.ParticleType.NuMuBar,
+    dataclasses.I3Particle.ParticleType.NuTau,
+    dataclasses.I3Particle.ParticleType.NuTauBar,
+}
+LEPTON_TYPES = {
+    dataclasses.I3Particle.ParticleType.EPlus,
+    dataclasses.I3Particle.ParticleType.EMinus,
+    dataclasses.I3Particle.ParticleType.MuPlus,
+    dataclasses.I3Particle.ParticleType.MuMinus,
+    dataclasses.I3Particle.ParticleType.TauPlus,
+    dataclasses.I3Particle.ParticleType.TauMinus,
+}
+ELECTRON_TYPES = {
+    dataclasses.I3Particle.ParticleType.EPlus,
+    dataclasses.I3Particle.ParticleType.EMinus,
+}
+
+CLASSIFICATION_TO_MORPHOLOGY = {
+    0: 0,   # Outside cascade
+    1: 0,   # Cascade
+    5: 0,   # Double bang
+    6: 0,   # Stopping tau
+    7: 0,   # Glashow cascade
+    8: 0,   # Glashow track counted as cascade morphology per reference
+    9: 0,   # Glashow tau
+    12: 0,  # Uncontained tau
+    2: 1,   # Through-going track
+    3: 2,   # Starting track
+    4: 3,   # Stopping track
+    10: 3,  # Stop-start track (reserved)
+    11: 4,  # Passing track
+}
+
+ATMOSPHERIC_INTERACTION = 0
+CC_INTERACTION = 1
+NC_INTERACTION = 2
+GLASHOW_INTERACTION = 3
 
 
 def _get_children(mc_tree: "dataclasses.I3MCTree",
@@ -173,6 +214,203 @@ def compute_starting_flag(mc_tree: Optional["dataclasses.I3MCTree"],
 
     first, second = intersection
     return first <= 0.0 and second > 0.0
+
+
+def _infer_interaction_type(frame: icetray.I3Frame) -> int:
+    """Infer interaction type following the DeepIceLearning reference logic."""
+    if frame.Has("I3MCWeightDict"):
+        weights = frame["I3MCWeightDict"]
+        if "InteractionType" in weights:
+            return int(weights["InteractionType"])
+        return ATMOSPHERIC_INTERACTION
+
+    if frame.Has("EventProperties"):
+        props = frame["EventProperties"]
+        initial = props.initialType
+        final1 = props.finalType1
+        final2 = props.finalType2
+
+        if initial in NEUTRINO_TYPES and final1 in LEPTON_TYPES:
+            return CC_INTERACTION
+        if initial in NEUTRINO_TYPES and final1 in NEUTRINO_TYPES and final2 not in ELECTRON_TYPES:
+            return NC_INTERACTION
+        if (initial == dataclasses.I3Particle.ParticleType.NuEBar and
+                final1 in NEUTRINO_TYPES and final2 in ELECTRON_TYPES):
+            return GLASHOW_INTERACTION
+        return -1
+
+    if frame.Has("I3CorsikaInfo") or frame.Has("CorsikaWeightMap"):
+        return ATMOSPHERIC_INTERACTION
+
+    return ATMOSPHERIC_INTERACTION
+
+
+def _gather_detector_muons(particle: dataclasses.I3Particle,
+                           mc_tree: "dataclasses.I3MCTree",
+                           surface: phys_services.ExtrudedPolygon) -> List[dataclasses.I3Particle]:
+    """Recursively collect muons that intersect the detector volume."""
+    stack = [particle]
+    muons: List[dataclasses.I3Particle] = []
+    while stack:
+        current = stack.pop()
+        pdg = int(getattr(current, "pdg_encoding", 0) or 0)
+        if abs(pdg) == 13 and _has_signature(current, surface) != -1:
+            muons.append(current)
+
+        for child in _get_children(mc_tree, current):
+            stack.append(child)
+    return muons
+
+
+def _classify_corsika_event(mc_tree: Optional["dataclasses.I3MCTree"],
+                            surface: Optional[phys_services.ExtrudedPolygon]) -> int:
+    if mc_tree is None or surface is None:
+        return 100
+
+    if hasattr(mc_tree, "primaries") and mc_tree.primaries:
+        primaries = list(mc_tree.primaries)
+    elif hasattr(mc_tree, "get_primaries"):
+        primaries = list(mc_tree.get_primaries())
+    else:
+        primaries = [particle for particle in mc_tree]
+
+    per_primary_muons: List[List[dataclasses.I3Particle]] = []
+    for primary in primaries:
+        muons = _gather_detector_muons(primary, mc_tree, surface)
+        if muons:
+            per_primary_muons.append(muons)
+
+    if not per_primary_muons:
+        return 11  # Passing track with no clear in-ice muon
+
+    if len(per_primary_muons) > 1:
+        return 21  # Multiple coincident events
+
+    muons = per_primary_muons[0]
+    if len(muons) > 1:
+        signatures = np.array([_has_signature(mu, surface) for mu in muons])
+        if np.any(signatures == 1):
+            return 22  # Through-going bundle
+        return 23  # Stopping bundle
+
+    signature = _has_signature(muons[0], surface)
+    if signature == 2:
+        return 4  # Stopping track
+    return 2  # Reference treats all other signatures as through-going
+
+
+def _classify_neutrino_event(mc_tree: Optional["dataclasses.I3MCTree"],
+                             primary: Optional[dataclasses.I3Particle],
+                             surface: Optional[phys_services.ExtrudedPolygon],
+                             interaction_type: int) -> int:
+    if mc_tree is None or primary is None or surface is None:
+        return 100
+
+    children = _get_children(mc_tree, primary)
+    if not children:
+        return 100
+
+    pclass = 101
+    particle_types = [abs(int(getattr(child, "pdg_encoding", 0) or 0)) for child in children]
+    if interaction_type == CC_INTERACTION and 14 in particle_types:
+        idx = particle_types.index(14)
+        next_children = _get_children(mc_tree, children[idx])
+        if next_children:
+            children = next_children
+            particle_types = [abs(int(getattr(child, "pdg_encoding", 0) or 0)) for child in children]
+
+    particle_strings = [getattr(child, "type_string", "") for child in children]
+    ic_hit = any(
+        (_has_signature(child, surface) != -1) and np.isfinite(getattr(child, "length", np.nan))
+        for child in children
+    )
+    ic_hit = True  # Reference implementation forces IC_hit True after computation
+
+    if (interaction_type == GLASHOW_INTERACTION and len(particle_types) == 1
+            and particle_strings[0] == 'Hadrons'):
+        return 7
+
+    if (11 in particle_types) or (interaction_type == NC_INTERACTION):
+        return 1 if ic_hit else 0
+
+    if 13 in particle_types:
+        mu_index = particle_types.index(13)
+        mu_particle = children[mu_index]
+        mu_signature = _has_signature(mu_particle, surface)
+
+        if not ic_hit:
+            return 11
+        elif interaction_type == GLASHOW_INTERACTION:
+            if mu_signature == 0:
+                return 8
+        elif mu_signature == 0:
+            return 3
+        elif mu_signature == 1:
+            return 2
+        elif mu_signature == 2:
+            return 4
+        elif mu_signature == -1:
+            return 11
+        return pclass
+
+    if 15 in particle_types:
+        tau_index = particle_types.index(15)
+        tau_particle = children[tau_index]
+        if not ic_hit:
+            return 12
+        elif interaction_type == GLASHOW_INTERACTION:
+            return 9
+
+        tau_children = _get_children(mc_tree, tau_particle)
+        tau_child = tau_children[-1] if tau_children else None
+        tau_signature = _has_signature(tau_particle, surface)
+
+        if tau_child is not None:
+            tau_child_pdg = abs(int(getattr(tau_child, "pdg_encoding", 0) or 0))
+            tau_child_sig = _has_signature(tau_child, surface)
+            if tau_child_pdg == 13:
+                if tau_child_sig == 0:
+                    return 3
+                if tau_child_sig == 1:
+                    return 2
+                if tau_child_sig == 2:
+                    return 4
+            else:
+                if tau_signature == 0 and tau_child_sig == 0:
+                    return 5
+                if tau_signature == 0 and tau_child_sig == -1:
+                    return 3
+                if tau_signature == 2 and tau_child_sig == 0:
+                    return 6
+                if tau_signature == 1:
+                    return 2
+
+        if tau_signature == 0:
+            return 3
+        if tau_signature == 1:
+            return 2
+        if tau_signature == 2:
+            return 4
+
+    return 100
+
+
+def compute_morphology_labels(frame: icetray.I3Frame,
+                              mc_tree: Optional["dataclasses.I3MCTree"],
+                              primary: Optional[dataclasses.I3Particle],
+                              surface: Optional[phys_services.ExtrudedPolygon]) -> Tuple[int, int]:
+    """Return (classification_code, morphology_label) from MC truth."""
+    if frame is None:
+        return 100, CLASSIFICATION_TO_MORPHOLOGY.get(100, 5)
+
+    interaction_type = _infer_interaction_type(frame)
+    if interaction_type == ATMOSPHERIC_INTERACTION and not frame.Has("I3MCWeightDict") and not frame.Has("EventProperties"):
+        pclass = _classify_corsika_event(mc_tree, surface)
+    else:
+        pclass = _classify_neutrino_event(mc_tree, primary, surface, interaction_type)
+
+    morphology = CLASSIFICATION_TO_MORPHOLOGY.get(pclass, 5)
+    return pclass, morphology
 
 def find_i3_files(input_path: str) -> List[str]:
     """Find all i3 files (including .i3.zst) in the input directory."""
@@ -360,55 +598,9 @@ def parse_mc_truth(frame: icetray.I3Frame,
             if final_hadrons is None and particle.type == dataclasses.I3Particle.ParticleType.Hadrons:
                 final_hadrons = particle
 
-    def neutrino_flavor(pdg_code: int) -> Optional[str]:
-        return {12: 'NuE', 14: 'NuMu', 16: 'NuTau'}.get(abs(pdg_code))
-
-    def charged_lepton_family(pdg_code: int) -> Optional[str]:
-        return {11: 'E', 13: 'Mu', 15: 'Tau'}.get(abs(pdg_code))
-
-    primary_pdg = int(getattr(primary, "pdg_encoding", 0) or 0)
-    primary_flavor = neutrino_flavor(primary_pdg)
-
-    children: List[dataclasses.I3Particle] = []
-    if mc_tree and tree_primary:
-        if hasattr(mc_tree, "children"):
-            children = list(mc_tree.children(tree_primary))
-        elif hasattr(mc_tree, "get_daughters"):
-            children = list(mc_tree.get_daughters(tree_primary))
-
-    cc_nc = None
-    base_name = primary.type.name if hasattr(primary.type, "name") else str(primary.type)
-    if base_name.endswith('Bar') and base_name.startswith('Nu'):
-        base_name = base_name[:-3]
-
-    first_child = children[0] if children else None
-    if primary_flavor and first_child is not None:
-        child_pdg = int(getattr(first_child, "pdg_encoding", 0) or 0)
-        family = charged_lepton_family(child_pdg)
-        expected_family = primary_flavor.replace('Nu', '')
-        if family and family == expected_family:
-            cc_nc = 'CC'
-        elif neutrino_flavor(child_pdg) == primary_flavor:
-            cc_nc = 'NC'
-
-    if cc_nc is None and primary_flavor and mc_tree:
-        found_lepton = any(
-            abs(int(getattr(p, "pdg_encoding", 0) or 0)) in lepton_codes
-            and (skip_id is None or getattr(p, "id", None) != skip_id)
-            for p in mc_tree
-        )
-        if found_lepton:
-            cc_nc = 'CC'
-        else:
-            for p in mc_tree:
-                if skip_id is not None and getattr(p, "id", None) == skip_id:
-                    continue
-                if neutrino_flavor(int(getattr(p, "pdg_encoding", 0) or 0)) == primary_flavor:
-                    cc_nc = 'NC'
-                    break
-
-    interaction = f"{base_name}_{cc_nc}" if (cc_nc and base_name.startswith('Nu')) else base_name
-    parsed['interaction'] = interaction
+    event_class, morphology = compute_morphology_labels(frame, mc_tree, primary, surface)
+    parsed['event_class'] = event_class
+    parsed['morphology'] = morphology
 
     if final_lepton:
         final_energy[0] = final_lepton.energy
