@@ -15,6 +15,10 @@ cd nt-mmap-converter
 # Prometheus parquet files
 python converter.py --source prometheus --input /path/to/parquet/files/ --output mydata
 
+# Prometheus with early event filters (pre-grouping)
+python converter.py --source prometheus --input /path/to/parquet/files/ --output mydata \
+    --min-photons 50 --max-photons 20000 --min-channels 3
+
 # IceCube i3 files (optional filter selection shown)
 python converter.py --source icecube --input /path/to/i3/files/ --output mydata
 python converter.py --source icecube --input /path/to/i3/files/ --output mydata \
@@ -24,6 +28,10 @@ python converter.py --source icecube --input /path/to/i3/files/ --output mydata 
 
 # With hit grouping (time window in nanoseconds). highly recommend for prometheus datasets
 python converter.py --source prometheus --input /path/to/parquet/files/ --output mydata --grouping-window-ns 2.0
+
+# Filtering flags (Prometheus only, checked before grouping to skip quickly)
+# --min-photons / --max-photons : clamp total raw photon hits
+# --min-channels / --max-channels: clamp unique sensors hit (string_id/sensor_id pairs)
 ```
 
 ### Load

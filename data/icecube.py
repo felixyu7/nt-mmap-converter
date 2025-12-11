@@ -6,7 +6,7 @@ Handles conversion from i3 files to memory-mapped format.
 import glob
 import os
 from contextlib import closing
-from typing import List, Iterator, Tuple, Dict, Any, Optional, Set
+from typing import List, Iterator, Tuple, Dict, Any, Optional, Set, Sequence
 
 import icecube
 import numpy as np
@@ -653,14 +653,14 @@ def frame_passes_filters(frame: icetray.I3Frame, filter_names: Optional[Set[str]
     return False
 
 
-def convert_icecube_to_mmap(input_path: str, output_path: str,
+def convert_icecube_to_mmap(input_paths: Sequence[str], output_path: str,
                                file_range: str = None, pulse_key: str = "SplitInIceDSTPulses",
                                filter_names: Optional[List[str]] = None,
                                subevent_streams: Optional[List[str]] = None) -> Tuple[int, int]:
     """Convert IceCube i3 files to memory-mapped format using streaming approach.
 
     Args:
-        input_path: Directory containing i3/i3.zst files.
+        input_paths: One or more directories containing i3/i3.zst files.
         output_path: Base path for emitted mmap artifacts.
         file_range: Optional "start-end" slice of discovered files.
         pulse_key: Name of the pulse series to extract.
@@ -668,8 +668,12 @@ def convert_icecube_to_mmap(input_path: str, output_path: str,
     """
     
     # Find and filter input files
-    i3_files = find_i3_files(input_path)
-    print(f"Found {len(i3_files)} i3 files")
+    search_paths: List[str] = [input_paths] if isinstance(input_paths, str) else list(input_paths)
+    i3_files: List[str] = []
+    for path in search_paths:
+        i3_files.extend(find_i3_files(path))
+
+    print(f"Found {len(i3_files)} i3 files from {len(search_paths)} director{'y' if len(search_paths) == 1 else 'ies'}")
     
     if file_range:
         start, end = map(int, file_range.split('-'))

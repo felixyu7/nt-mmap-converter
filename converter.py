@@ -25,7 +25,8 @@ except ImportError:
     convert_icecube_to_mmap = None
 
 def write_run_config(output_base: str, args: argparse.Namespace, num_events: int,
-                     total_photons: int, elapsed_seconds: float) -> str:
+                     total_photons: int, elapsed_seconds: float,
+                     skipped_events: int = 0) -> str:
     """Persist conversion parameters and summary statistics alongside outputs."""
     config_path = f"{output_base}.config.json"
     payload = {
@@ -34,6 +35,7 @@ def write_run_config(output_base: str, args: argparse.Namespace, num_events: int
         "args": {k: v for k, v in vars(args).items()},
         "summary": {
             "events_converted": num_events,
+            "events_skipped": skipped_events,
             "photons_written": total_photons,
             "elapsed_seconds": round(elapsed_seconds, 3),
         },
@@ -51,10 +53,13 @@ def write_run_config(output_base: str, args: argparse.Namespace, num_events: int
 
 def print_conversion_summary(output_base: str, num_events: int,
                              total_photons: int, elapsed_seconds: float,
-                             include_dataset_info: bool) -> None:
+                             include_dataset_info: bool,
+                             skipped_events: int = 0) -> None:
     """Display conversion throughput, file sizes, and optional dataset stats."""
     print(f"\n=== Conversion Summary ===")
     print(f"Events converted: {num_events:,}")
+    if skipped_events:
+        print(f"Events skipped by filters: {skipped_events:,}")
     print(f"Total photons: {total_photons:,}")
     print(f"Time elapsed: {elapsed_seconds:.1f} seconds")
     if elapsed_seconds > 0:
@@ -97,9 +102,10 @@ def main():
     )
     
     parser.add_argument(
-        "--input", 
+        "--input",
+        nargs="+",
         required=True,
-        help="Input directory containing source data files"
+        help="One or more input directories containing source data files"
     )
     
     parser.add_argument(
@@ -128,6 +134,30 @@ def main():
         default=0.0,
         help="Time window for grouping hits by sensor in nanoseconds (0 = no grouping, use raw hits)"
     )
+    parser.add_argument(
+        "--min-photons",
+        type=int,
+        default=None,
+        help="Minimum number of photon hits required to keep a Prometheus event (checked before grouping)"
+    )
+    parser.add_argument(
+        "--max-photons",
+        type=int,
+        default=None,
+        help="Maximum number of photon hits allowed to keep a Prometheus event (checked before grouping)"
+    )
+    parser.add_argument(
+        "--min-channels",
+        type=int,
+        default=None,
+        help="Minimum number of hit sensors (unique string/sensor pairs) required to keep a Prometheus event"
+    )
+    parser.add_argument(
+        "--max-channels",
+        type=int,
+        default=None,
+        help="Maximum number of hit sensors (unique string/sensor pairs) allowed to keep a Prometheus event"
+    )
     
     parser.add_argument(
         "--pulse-key",
@@ -152,10 +182,15 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate input path
-    if not os.path.exists(args.input):
-        print(f"Error: Input path does not exist: {args.input}")
+    # Validate input paths (allow multiple directories)
+    input_paths = args.input if isinstance(args.input, list) else [args.input]
+    missing_inputs = [path for path in input_paths if not os.path.exists(path)]
+    if missing_inputs:
+        print("Error: The following input paths do not exist:")
+        for path in missing_inputs:
+            print(f"  - {path}")
         sys.exit(1)
+    args.input = input_paths
     
     # Create output directory if needed
     output_dir = os.path.dirname(args.output)
@@ -164,7 +199,7 @@ def main():
     
     print(f"NT-MMap-Converter")
     print(f"Source: {args.source}")
-    print(f"Input: {args.input}")
+    print(f"Input: {', '.join(args.input)}")
     print(f"Output: {args.output}")
     if args.file_range:
         print(f"File range: {args.file_range}")
@@ -174,8 +209,15 @@ def main():
     start_time = time.time()
     
     if args.source == "prometheus":
-        num_events, total_photons = convert_prometheus_to_mmap(
-            args.input, args.output, args.file_range, args.grouping_window_ns
+        num_events, total_photons, skipped_events = convert_prometheus_to_mmap(
+            args.input,
+            args.output,
+            args.file_range,
+            args.grouping_window_ns,
+            args.min_photons,
+            args.max_photons,
+            args.min_channels,
+            args.max_channels,
         )
     elif args.source == "icecube":
         if not ICECUBE_AVAILABLE:
@@ -186,6 +228,7 @@ def main():
             args.input, args.output, args.file_range, args.pulse_key,
             args.filters, args.subevent_streams
         )
+        skipped_events = 0
     else:
         print(f"Error: Unsupported source format: {args.source}")
         sys.exit(1)
@@ -194,10 +237,12 @@ def main():
     elapsed = time.time() - start_time
 
     print_conversion_summary(
-        args.output, num_events, total_photons, elapsed, args.info
+        args.output, num_events, total_photons, elapsed, args.info, skipped_events
     )
 
-    config_path = write_run_config(args.output, args, num_events, total_photons, elapsed)
+    config_path = write_run_config(
+        args.output, args, num_events, total_photons, elapsed, skipped_events
+    )
 
     print(f"\n✓ Conversion completed successfully!")
     print(f"Memory-mapped files created: {args.output}.idx, {args.output}.dat")

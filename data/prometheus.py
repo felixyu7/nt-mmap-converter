@@ -5,7 +5,7 @@ Handles conversion from parquet files to memory-mapped format.
 
 import glob
 import os
-from typing import Iterator, Tuple, Dict, Any
+from typing import Iterator, Tuple, Dict, Any, Sequence, List
 
 import numpy as np
 import pandas as pd
@@ -312,24 +312,45 @@ def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any]
             yield mc_truth, photons_raw
 
 
-def convert_prometheus_to_mmap(input_path: str, output_path: str,
-                              file_range: str = None, grouping_window_ns: float = 0.0) -> Tuple[int, int]:
+def convert_prometheus_to_mmap(input_paths: Sequence[str], output_path: str,
+                              file_range: str = None, grouping_window_ns: float = 0.0,
+                              min_photons: int = None, max_photons: int = None,
+                              min_channels: int = None, max_channels: int = None) -> Tuple[int, int, int]:
     """
     Convert Prometheus parquet files to memory-mapped format using streaming approach.
     
     Args:
-        input_path: Directory containing chunk_*.parquet files
+        input_paths: One or more directories containing chunk_*.parquet files
         output_path: Output path for memory-mapped files (without extension)
         file_range: Range of files to convert, e.g., '0-100' or '100-115'
         grouping_window_ns: Time window for hit grouping per sensor (0 = no grouping)
+        min_photons: Minimum photon hits required to keep an event (checked before grouping)
+        max_photons: Maximum photon hits allowed to keep an event (checked before grouping)
+        min_channels: Minimum unique sensors required to keep an event (checked before grouping)
+        max_channels: Maximum unique sensors allowed to keep an event (checked before grouping)
         
     Returns:
-        Tuple of (num_events_converted, total_photons)
+        Tuple of (num_events_converted, total_photons, events_skipped)
     """
+    def passes_filters(num_hits: int, num_chans: int) -> bool:
+        """Evaluate photon/channel thresholds if provided."""
+        if min_photons is not None and num_hits < min_photons:
+            return False
+        if max_photons is not None and num_hits > max_photons:
+            return False
+        if min_channels is not None and num_chans < min_channels:
+            return False
+        if max_channels is not None and num_chans > max_channels:
+            return False
+        return True
     
-    # Find input files
-    parquet_files = find_parquet_files(input_path)
-    print(f"Found {len(parquet_files)} parquet files")
+    # Normalize and find input files across all provided directories
+    search_paths: List[str] = [input_paths] if isinstance(input_paths, str) else list(input_paths)
+    parquet_files: List[str] = []
+    for path in search_paths:
+        parquet_files.extend(find_parquet_files(path))
+
+    print(f"Found {len(parquet_files)} parquet files from {len(search_paths)} director{'y' if len(search_paths) == 1 else 'ies'}")
     
     # Limit files if specified
     if file_range:
@@ -352,8 +373,32 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     # Convert events
     total_photons = 0
     current_photon_idx = 0
+    skipped_events = 0
+    filters_active = any(
+        value is not None for value in (min_photons, max_photons, min_channels, max_channels)
+    )
+    needs_channel_counts = (min_channels is not None) or (max_channels is not None)
     
     for mc_truth, photons_raw in iter_prometheus_events(parquet_files):
+        # Quick skip for empty events before any heavy processing
+        raw_num_photons = len(photons_raw['t'])
+        if raw_num_photons == 0:
+            if filters_active:
+                skipped_events += 1
+            continue
+
+        # Optional early filter using raw hit counts to avoid grouping work
+        if filters_active:
+            raw_num_chans = raw_num_photons
+            if needs_channel_counts:
+                raw_num_chans = len(np.unique(
+                    np.column_stack((photons_raw['string_id'], photons_raw['sensor_id'])),
+                    axis=0
+                ))
+            if not passes_filters(raw_num_photons, raw_num_chans):
+                skipped_events += 1
+                continue
+
         # Process photons with optional grouping
         photons = process_photons_with_grouping(photons_raw, grouping_window_ns)
         
@@ -363,6 +408,8 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
         
         # Skip events with no photons - they're not useful for ML training
         if num_photons == 0:
+            if filters_active:
+                skipped_events += 1
             continue
             
         # Compute hit statistics
@@ -395,6 +442,8 @@ def convert_prometheus_to_mmap(input_path: str, output_path: str,
     final_event_count = index_writer.finalize()
     
     print(f"Conversion complete: {final_event_count:,} events, {total_photons:,} total photons")
+    if skipped_events:
+        print(f"Skipped {skipped_events:,} events due to filters or empty hits")
     print(f"Output files: {output_path}.idx, {output_path}.dat")
     
-    return final_event_count, total_photons
+    return final_event_count, total_photons, skipped_events
