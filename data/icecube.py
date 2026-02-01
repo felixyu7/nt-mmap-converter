@@ -52,6 +52,9 @@ CLASSIFICATION_TO_MORPHOLOGY = {
     11: 4,  # Passing track
 }
 
+# Classifications where visible particles originate inside detector (matches DeepIceLearning)
+STARTING_CLASSIFICATIONS = {1, 3, 5, 7, 9, 10}
+
 ATMOSPHERIC_INTERACTION = 0
 CC_INTERACTION = 1
 NC_INTERACTION = 2
@@ -129,91 +132,6 @@ def _has_signature(particle: dataclasses.I3Particle,
             return 2
 
     return -1
-
-
-def _find_particle(candidate: dataclasses.I3Particle,
-                   mc_tree: "dataclasses.I3MCTree",
-                   surface: phys_services.ExtrudedPolygon) -> List[dataclasses.I3Particle]:
-    children = _get_children(mc_tree, candidate)
-    if len(children) > 3:
-        return []
-
-    interacts_in_detector = any(
-        (_has_signature(child, surface) != -1) and np.isfinite(getattr(child, "length", np.nan))
-        for child in children
-    )
-    if interacts_in_detector:
-        pdg_code = int(getattr(candidate, "pdg_encoding", 0) or 0)
-        if abs(pdg_code) not in NEUTRINO_PDGS and not getattr(candidate, "is_neutrino", False):
-            parent = _get_parent(mc_tree, candidate)
-            return [parent] if parent is not None else []
-        return [candidate]
-
-    if len(children) < 3:
-        found: List[dataclasses.I3Particle] = []
-        for child in children:
-            found.extend(_find_particle(child, mc_tree, surface))
-        return found
-
-    return []
-
-
-def _locate_interaction_neutrino(mc_tree: Optional["dataclasses.I3MCTree"],
-                                 surface: Optional[phys_services.ExtrudedPolygon]) -> Optional[dataclasses.I3Particle]:
-    if mc_tree is None or surface is None:
-        return None
-
-    if hasattr(mc_tree, "primaries") and mc_tree.primaries:
-        primaries = list(mc_tree.primaries)
-    elif hasattr(mc_tree, "get_primaries"):
-        primaries = list(mc_tree.get_primaries())
-    else:
-        primaries = [p for p in mc_tree]
-
-    seed = None
-    for particle in primaries:
-        pdg_code = int(getattr(particle, "pdg_encoding", 0) or 0)
-        if abs(pdg_code) in NEUTRINO_PDGS or getattr(particle, "is_neutrino", False):
-            seed = particle
-            break
-
-    if seed is None and primaries:
-        seed = primaries[0]
-
-    if seed is None:
-        return None
-
-    found = _find_particle(seed, mc_tree, surface)
-    if len(found) == 1:
-        return found[0]
-    return None
-
-
-def compute_starting_flag(mc_tree: Optional["dataclasses.I3MCTree"],
-                          surface: Optional[phys_services.ExtrudedPolygon]) -> bool:
-    """Return True when the neutrino interaction point is inside the detector volume."""
-    neutrino = _locate_interaction_neutrino(mc_tree, surface)
-    if neutrino is None or surface is None:
-        return False
-
-    length = float(getattr(neutrino, "length", np.nan))
-    base_pos = neutrino.pos
-    if np.isfinite(length):
-        direction = neutrino.dir
-        interaction_pos = dataclasses.I3Position(
-            base_pos.x + length * direction.x,
-            base_pos.y + length * direction.y,
-            base_pos.z + length * direction.z,
-        )
-    else:
-        interaction_pos = base_pos
-
-    intersection = _safe_intersection(surface, interaction_pos, neutrino.dir)
-    if intersection is None:
-        return False
-
-    first, second = intersection
-    return first <= 0.0 and second > 0.0
 
 
 def _infer_interaction_type(frame: icetray.I3Frame) -> int:
@@ -543,8 +461,7 @@ def parse_pulses(frame: icetray.I3Frame, pulse_key: str, geometry: dataclasses.I
 
 
 def parse_mc_truth(frame: icetray.I3Frame,
-                   surface: Optional[phys_services.ExtrudedPolygon] = None,
-                   skip_starting_flag: bool = False) -> Dict[str, Any]:
+                   surface: Optional[phys_services.ExtrudedPolygon] = None) -> Dict[str, Any]:
     """Parse MC truth information from an I3Frame."""
     mc_tree = None
     if "I3MCTree" in frame:
@@ -633,10 +550,7 @@ def parse_mc_truth(frame: icetray.I3Frame,
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
-    if skip_starting_flag:
-        parsed['starting'] = False
-    else:
-        parsed['starting'] = compute_starting_flag(mc_tree, surface)
+    parsed['starting'] = event_class in STARTING_CLASSIFICATIONS
 
     return parsed
 
@@ -719,8 +633,7 @@ def convert_icecube_to_mmap(input_paths: Sequence[str], output_path: str,
             continue
 
         # Create event record from MC truth
-        skip_starting_label = "corsika" in os.path.basename(source_path).lower()
-        mc_truth = parse_mc_truth(frame, detector_surface, skip_starting_flag=skip_starting_label)
+        mc_truth = parse_mc_truth(frame, detector_surface)
         
         # Process photons
         photons = parse_pulses(frame, pulse_key, geometry)
