@@ -7,6 +7,7 @@ import glob
 import os
 from contextlib import closing
 from typing import List, Iterator, Tuple, Dict, Any, Optional, Set, Sequence
+from enum import IntEnum
 
 import icecube
 import numpy as np
@@ -36,29 +37,140 @@ ELECTRON_TYPES = {
     dataclasses.I3Particle.ParticleType.EMinus,
 }
 
-CLASSIFICATION_TO_MORPHOLOGY = {
-    0: 0,   # Outside cascade
-    1: 0,   # Cascade
-    5: 0,   # Double bang
-    6: 0,   # Stopping tau
-    7: 0,   # Glashow cascade
-    8: 0,   # Glashow track counted as cascade morphology per reference
-    9: 0,   # Glashow tau
-    12: 0,  # Uncontained tau
-    2: 1,   # Through-going track
-    3: 2,   # Starting track
-    4: 3,   # Stopping track
-    10: 3,  # Stop-start track (reserved)
-    11: 4,  # Passing track
+# PDG codes for particle classification
+MUON_PDGS = {13, -13}
+TAU_PDGS = {15, -15}
+ELECTRON_PDGS = {11, -11}
+ELECTRON_NEUTRINO_PDGS = {12, -12}
+MUON_NEUTRINO_PDGS = {14, -14}
+TAU_NEUTRINO_PDGS = {16, -16}
+HADRON_PDG = -2000001006  # IceCube's Hadrons pseudo-particle
+
+# Common hadron PDGs (matching I3EventLabeler's cascade_types)
+MESON_PDGS = {111, 211, -211, 321, -321, 310, 130, 221}  # pions, kaons, eta
+BARYON_PDGS = {2212, -2212, 2112, -2112, 3122, -3122}  # protons, neutrons, lambdas
+LOSS_PDGS = {-2000001001, -2000001002, -2000001003, -2000001004, -2000001007}
+
+# Cascade-type PDGs (electrons, gammas, hadrons) - matches I3EventLabeler
+CASCADE_PDGS = ELECTRON_PDGS | {22, HADRON_PDG} | MESON_PDGS | BARYON_PDGS | LOSS_PDGS
+
+# Morphology classes (simplified, 6 classes)
+class Morphology(IntEnum):
+    CASCADE = 0          # Shower-like events (neutrino NC, NuE CC, tau decays to e/hadrons)
+    STARTING_TRACK = 1   # Track born inside detector, exits
+    THROUGHGOING_TRACK = 2  # Track enters from outside and exits
+    STOPPING_TRACK = 3   # Track enters and stops/decays inside
+    UNCONTAINED = 4      # No detector primary (misses/skims detector)
+    BUNDLE = 5           # Multiple detector primaries (muon bundles)
+
+
+# Detailed event classes (34 classes, matching I3EventLabeler)
+class EventClass(IntEnum):
+    # Uncontained events (0-5) -> Morphology.UNCONTAINED
+    BACKGROUND = 0               # No particle within search radius
+    UNCONTAINED_CASCADE = 1      # Cascade outside detector
+    SKIMMING_TRACK = 2           # Single muon skims past detector
+    SKIMMING_BUNDLE = 3          # Multiple muons skim past
+    SKIMMING_SPUR = 4            # Tau skims past
+    OTHER_UNCONTAINED = 5        # Other uncontained
+
+    # Multiple primaries (6-7) -> Morphology.BUNDLE
+    BUNDLE = 6                   # All primaries are muons
+    OTHER_MULTIPLE = 7           # Mixed particle types
+
+    # NC interactions (8) -> Morphology.CASCADE
+    HADR_CASCADE = 8             # All neutrino NC interactions
+
+    # NuE CC (9) -> Morphology.CASCADE
+    EM_HADR_CASCADE = 9          # NuE CC interaction
+
+    # Glashow resonance (10-18)
+    GLASHOW_ELECTRON = 10        # W -> electron -> CASCADE
+    GLASHOW_HADR = 11            # W -> hadrons -> CASCADE
+    GLASHOW_STARTING_TRACK = 12  # W -> muon, exits -> STARTING_TRACK
+    GLASHOW_CONTAINED_TRACK = 13 # W -> muon, stops -> STOPPING_TRACK
+    GLASHOW_STARTING_SPUR = 14   # W -> tau, exits -> STARTING_TRACK
+    GLASHOW_LOLLIPOP_HADR = 15   # W -> tau -> hadrons -> CASCADE
+    GLASHOW_LOLLIPOP_EM = 16     # W -> tau -> electron -> CASCADE
+    GLASHOW_TAU_STARTING_TRACK = 17   # W -> tau -> muon, exits -> STARTING_TRACK
+    GLASHOW_TAU_CONTAINED_TRACK = 18  # W -> tau -> muon, stops -> STOPPING_TRACK
+
+    # NuMu CC (19-20)
+    STARTING_TRACK = 19          # Muon exits -> STARTING_TRACK
+    CONTAINED_TRACK = 20         # Muon stops -> STOPPING_TRACK
+
+    # NuTau CC (21-25)
+    INVERTED_LOLLIPOP = 21             # Tau exits -> STARTING_TRACK
+    DOUBLE_BANG_EM = 22                # Tau -> electron -> CASCADE
+    DOUBLE_BANG_HADR = 23              # Tau -> hadrons -> CASCADE
+    INVERTED_LOLLIPOP_STARTING_TRACK = 24  # Tau -> muon, exits -> STARTING_TRACK
+    INVERTED_LOLLIPOP_CONTAINED_TRACK = 25 # Tau -> muon, stops -> STOPPING_TRACK
+
+    # Muon entering detector (26-27)
+    THROUGHGOING_TRACK = 26      # Muon traverses -> THROUGHGOING_TRACK
+    STOPPING_TRACK = 27          # Muon stops -> STOPPING_TRACK
+
+    # Tau entering detector (28-32)
+    THROUGHGOING_SPUR = 28       # Tau traverses -> THROUGHGOING_TRACK
+    LOLLIPOP_EM = 29             # Tau -> electron -> CASCADE
+    LOLLIPOP_HADR = 30           # Tau -> hadrons -> CASCADE
+    TAU_STARTING_TRACK = 31      # Tau -> muon, exits -> STARTING_TRACK
+    TAU_CONTAINED_TRACK = 32     # Tau -> muon, stops -> STOPPING_TRACK
+
+    # Other
+    OTHER = 33                   # Edge cases -> UNCONTAINED
+
+
+# Map detailed event classes to simplified morphologies
+DETAILED_TO_MORPHOLOGY = {
+    # Uncontained -> UNCONTAINED
+    EventClass.BACKGROUND: Morphology.UNCONTAINED,
+    EventClass.UNCONTAINED_CASCADE: Morphology.UNCONTAINED,
+    EventClass.SKIMMING_TRACK: Morphology.UNCONTAINED,
+    EventClass.SKIMMING_BUNDLE: Morphology.UNCONTAINED,
+    EventClass.SKIMMING_SPUR: Morphology.UNCONTAINED,
+    EventClass.OTHER_UNCONTAINED: Morphology.UNCONTAINED,
+
+    # Bundle -> BUNDLE
+    EventClass.BUNDLE: Morphology.BUNDLE,
+    EventClass.OTHER_MULTIPLE: Morphology.BUNDLE,
+
+    # Cascades -> CASCADE
+    EventClass.HADR_CASCADE: Morphology.CASCADE,
+    EventClass.EM_HADR_CASCADE: Morphology.CASCADE,
+    EventClass.GLASHOW_ELECTRON: Morphology.CASCADE,
+    EventClass.GLASHOW_HADR: Morphology.CASCADE,
+    EventClass.DOUBLE_BANG_EM: Morphology.CASCADE,
+    EventClass.DOUBLE_BANG_HADR: Morphology.CASCADE,
+    EventClass.LOLLIPOP_EM: Morphology.CASCADE,
+    EventClass.LOLLIPOP_HADR: Morphology.CASCADE,
+    EventClass.GLASHOW_LOLLIPOP_EM: Morphology.CASCADE,
+    EventClass.GLASHOW_LOLLIPOP_HADR: Morphology.CASCADE,
+
+    # Starting tracks -> STARTING_TRACK
+    EventClass.STARTING_TRACK: Morphology.STARTING_TRACK,
+    EventClass.GLASHOW_STARTING_TRACK: Morphology.STARTING_TRACK,
+    EventClass.GLASHOW_STARTING_SPUR: Morphology.STARTING_TRACK,
+    EventClass.INVERTED_LOLLIPOP: Morphology.STARTING_TRACK,
+    EventClass.INVERTED_LOLLIPOP_STARTING_TRACK: Morphology.STARTING_TRACK,
+    EventClass.TAU_STARTING_TRACK: Morphology.STARTING_TRACK,
+    EventClass.GLASHOW_TAU_STARTING_TRACK: Morphology.STARTING_TRACK,
+
+    # Throughgoing -> THROUGHGOING_TRACK
+    EventClass.THROUGHGOING_TRACK: Morphology.THROUGHGOING_TRACK,
+    EventClass.THROUGHGOING_SPUR: Morphology.THROUGHGOING_TRACK,
+
+    # Stopping/contained -> STOPPING_TRACK
+    EventClass.STOPPING_TRACK: Morphology.STOPPING_TRACK,
+    EventClass.CONTAINED_TRACK: Morphology.STOPPING_TRACK,
+    EventClass.GLASHOW_CONTAINED_TRACK: Morphology.STOPPING_TRACK,
+    EventClass.INVERTED_LOLLIPOP_CONTAINED_TRACK: Morphology.STOPPING_TRACK,
+    EventClass.TAU_CONTAINED_TRACK: Morphology.STOPPING_TRACK,
+    EventClass.GLASHOW_TAU_CONTAINED_TRACK: Morphology.STOPPING_TRACK,
+
+    # Other -> UNCONTAINED
+    EventClass.OTHER: Morphology.UNCONTAINED,
 }
-
-# Classifications where visible particles originate inside detector (matches DeepIceLearning)
-STARTING_CLASSIFICATIONS = {1, 3, 5, 7, 9, 10}
-
-ATMOSPHERIC_INTERACTION = 0
-CC_INTERACTION = 1
-NC_INTERACTION = 2
-GLASHOW_INTERACTION = 3
 
 
 def _get_children(mc_tree: "dataclasses.I3MCTree",
@@ -101,234 +213,368 @@ def _is_cascade(particle: dataclasses.I3Particle) -> bool:
     return bool(getattr(particle, "is_cascade", False))
 
 
-def _has_signature(particle: dataclasses.I3Particle,
-                   surface: phys_services.ExtrudedPolygon) -> int:
-    if getattr(particle, "is_neutrino", False):
-        return -1
+def _get_siblings(mc_tree: "dataclasses.I3MCTree",
+                  particle: dataclasses.I3Particle) -> List[dataclasses.I3Particle]:
+    """Get sibling particles (children of the same parent)."""
+    parent = _get_parent(mc_tree, particle)
+    if parent is None:
+        return []
+    siblings = _get_children(mc_tree, parent)
+    return [s for s in siblings if s != particle]
 
+
+def _get_detector_primaries(mc_tree: "dataclasses.I3MCTree",
+                            surface: phys_services.ExtrudedPolygon) -> List[dataclasses.I3Particle]:
+    """
+    Identify particles that actually intersect the detector volume.
+
+    A "detector primary" is a particle that:
+    1. Is born before entering the detector (0 < isect.first)
+    2. Dies after entering the detector (isect.first < length)
+    3. For neutrinos: must interact inside (length < isect.second)
+
+    This matches I3EventLabeler's get_primaries() logic.
+    """
+    primaries = []
+
+    for particle in mc_tree:
+        pos = getattr(particle, "pos", None)
+        direction = getattr(particle, "dir", None)
+        if pos is None or direction is None:
+            continue
+
+        isect = _safe_intersection(surface, pos, direction)
+        if isect is None:
+            continue
+
+        first, second = isect
+        length = float(getattr(particle, "length", np.nan))
+
+        if not np.isfinite(length):
+            continue
+
+        # Check: particle born before entry AND dies after entry
+        if 0 < first < length:
+            pdg = int(getattr(particle, "pdg_encoding", 0) or 0)
+
+            if abs(pdg) in NEUTRINO_PDGS:
+                # Neutrinos must interact inside detector
+                if length < second:
+                    primaries.append(particle)
+            else:
+                # Non-neutrinos just need to enter
+                primaries.append(particle)
+
+    return primaries
+
+
+def _get_closest_particle(mc_tree: "dataclasses.I3MCTree",
+                          surface: phys_services.ExtrudedPolygon,
+                          max_distance: float = 300.0) -> Optional[dataclasses.I3Particle]:
+    """
+    Find the signal non-neutrino particle that closest approaches the detector.
+    Uses perpendicular closest approach distance, matching I3EventLabeler::get_closest().
+    """
+    primaries = list(mc_tree.primaries) if hasattr(mc_tree, "primaries") else []
+    cosmic_primary = primaries[0] if primaries else None
+
+    closest_particle = None
+    min_distance = max_distance
+
+    for particle in mc_tree:
+        # Only consider signal particles (in subtree of cosmic primary)
+        if cosmic_primary is not None:
+            try:
+                if not mc_tree.is_in_subtree(cosmic_primary, particle):
+                    continue
+            except (AttributeError, RuntimeError):
+                pass  # Fall back to considering all particles if method unavailable
+
+        pdg = int(getattr(particle, "pdg_encoding", 0) or 0)
+        if abs(pdg) in NEUTRINO_PDGS:
+            continue
+
+        energy = float(getattr(particle, "energy", 0.0))
+        if energy <= 0.1:  # Skip low-energy particles (matches C++: p.GetEnergy() > 0.1)
+            continue
+
+        # Use closest_approach for perpendicular distance (matches I3EventLabeler)
+        approach = surface.closest_approach(particle)
+        distance = approach.distance  # NaN if particle intersects detector
+
+        # NaN < min_distance is False, so intersecting particles are skipped naturally
+        if distance < min_distance:
+            min_distance = distance
+            closest_particle = particle
+
+    return closest_particle
+
+
+def _get_track_containment(particle: dataclasses.I3Particle,
+                           surface: phys_services.ExtrudedPolygon) -> str:
+    """
+    Determine track containment: 'starting', 'throughgoing', 'stopping', or 'none'.
+
+    Based on I3EventLabeler logic:
+    - starting: particle born inside detector (first <= 0), exits (length >= second)
+    - stopping: particle stops inside detector (length < second)
+    - throughgoing: enters (first > 0) and exits (length >= second)
+    - none: doesn't intersect meaningfully
+    """
     pos = getattr(particle, "pos", None)
     direction = getattr(particle, "dir", None)
     if pos is None or direction is None:
-        return -1
+        return "none"
 
-    intersection = _safe_intersection(surface, pos, direction)
-    if intersection is None:
-        return -1
+    isect = _safe_intersection(surface, pos, direction)
+    if isect is None:
+        return "none"
 
-    first, second = intersection
+    first, second = isect
     length = float(getattr(particle, "length", np.nan))
 
-    if _is_cascade(particle):
-        return 0 if first <= 0.0 and second > 0.0 else -1
+    # Handle infinite/missing length as exiting
+    if not np.isfinite(length):
+        if first <= 0 and second > 0:
+            return "starting"
+        elif first > 0:
+            return "throughgoing"
+        return "none"
 
-    if _is_track(particle):
-        if first <= 0.0 and second > 0.0:
-            return 0
-        if first > 0.0 and second > 0.0:
-            if np.isfinite(length) and length <= first:
-                return -1
-            if (np.isfinite(length) and length > second) or not np.isfinite(length):
-                return 1
-            return 2
+    # Particle starts inside detector
+    if first <= 0 and second > 0:
+        if length < second:
+            return "stopping"  # Born inside, stops inside
+        return "starting"  # Born inside, exits
 
-    return -1
+    # Particle enters from outside
+    if first > 0 and first < length:
+        if length < second:
+            return "stopping"
+        else:
+            return "throughgoing"
 
-
-def _infer_interaction_type(frame: icetray.I3Frame) -> int:
-    """Infer interaction type following the DeepIceLearning reference logic."""
-    if frame.Has("I3MCWeightDict"):
-        weights = frame["I3MCWeightDict"]
-        if "InteractionType" in weights:
-            return int(weights["InteractionType"])
-        return ATMOSPHERIC_INTERACTION
-
-    if frame.Has("EventProperties"):
-        props = frame["EventProperties"]
-        initial = props.initialType
-        final1 = props.finalType1
-        final2 = props.finalType2
-
-        if initial in NEUTRINO_TYPES and final1 in LEPTON_TYPES:
-            return CC_INTERACTION
-        if initial in NEUTRINO_TYPES and final1 in NEUTRINO_TYPES and final2 not in ELECTRON_TYPES:
-            return NC_INTERACTION
-        if (initial == dataclasses.I3Particle.ParticleType.NuEBar and
-                final1 in NEUTRINO_TYPES and final2 in ELECTRON_TYPES):
-            return GLASHOW_INTERACTION
-        return -1
-
-    if frame.Has("I3CorsikaInfo") or frame.Has("CorsikaWeightMap"):
-        return ATMOSPHERIC_INTERACTION
-
-    return ATMOSPHERIC_INTERACTION
+    return "none"
 
 
-def _gather_detector_muons(particle: dataclasses.I3Particle,
-                           mc_tree: "dataclasses.I3MCTree",
-                           surface: phys_services.ExtrudedPolygon) -> List[dataclasses.I3Particle]:
-    """Recursively collect muons that intersect the detector volume."""
-    stack = [particle]
-    muons: List[dataclasses.I3Particle] = []
-    while stack:
-        current = stack.pop()
-        pdg = int(getattr(current, "pdg_encoding", 0) or 0)
-        if abs(pdg) == 13 and _has_signature(current, surface) != -1:
-            muons.append(current)
+def _classify_uncontained(closest: Optional[dataclasses.I3Particle],
+                          mc_tree: "dataclasses.I3MCTree") -> EventClass:
+    """Classify events with no detector primaries."""
+    if closest is None:
+        return EventClass.BACKGROUND
 
-        for child in _get_children(mc_tree, current):
-            stack.append(child)
-    return muons
+    pdg = abs(int(getattr(closest, "pdg_encoding", 0) or 0))
 
-
-def _classify_corsika_event(mc_tree: Optional["dataclasses.I3MCTree"],
-                            surface: Optional[phys_services.ExtrudedPolygon]) -> int:
-    if mc_tree is None or surface is None:
-        return 100
-
-    if hasattr(mc_tree, "primaries") and mc_tree.primaries:
-        primaries = list(mc_tree.primaries)
-    elif hasattr(mc_tree, "get_primaries"):
-        primaries = list(mc_tree.get_primaries())
+    if pdg in MUON_PDGS:
+        siblings = _get_siblings(mc_tree, closest)
+        muon_siblings = [s for s in siblings if abs(int(getattr(s, "pdg_encoding", 0) or 0)) in MUON_PDGS]
+        if len(muon_siblings) > 1:  # Match I3EventLabeler: requires >1 muon siblings
+            return EventClass.SKIMMING_BUNDLE
+        return EventClass.SKIMMING_TRACK
+    elif pdg in TAU_PDGS:
+        return EventClass.SKIMMING_SPUR
+    elif pdg in CASCADE_PDGS:
+        return EventClass.UNCONTAINED_CASCADE
     else:
-        primaries = [particle for particle in mc_tree]
-
-    per_primary_muons: List[List[dataclasses.I3Particle]] = []
-    for primary in primaries:
-        muons = _gather_detector_muons(primary, mc_tree, surface)
-        if muons:
-            per_primary_muons.append(muons)
-
-    if not per_primary_muons:
-        return 11  # Passing track with no clear in-ice muon
-
-    if len(per_primary_muons) > 1:
-        return 21  # Multiple coincident events
-
-    muons = per_primary_muons[0]
-    if len(muons) > 1:
-        signatures = np.array([_has_signature(mu, surface) for mu in muons])
-        if np.any(signatures == 1):
-            return 22  # Through-going bundle
-        return 23  # Stopping bundle
-
-    signature = _has_signature(muons[0], surface)
-    if signature == 2:
-        return 4  # Stopping track
-    return 2  # Reference treats all other signatures as through-going
+        return EventClass.OTHER_UNCONTAINED
 
 
-def _classify_neutrino_event(mc_tree: Optional["dataclasses.I3MCTree"],
-                             primary: Optional[dataclasses.I3Particle],
-                             surface: Optional[phys_services.ExtrudedPolygon],
-                             interaction_type: int) -> int:
-    if mc_tree is None or primary is None or surface is None:
-        return 100
-
-    children = _get_children(mc_tree, primary)
-    if not children:
-        return 100
-
-    pclass = 101
-    particle_types = [abs(int(getattr(child, "pdg_encoding", 0) or 0)) for child in children]
-    if interaction_type == CC_INTERACTION and 14 in particle_types:
-        idx = particle_types.index(14)
-        next_children = _get_children(mc_tree, children[idx])
-        if next_children:
-            children = next_children
-            particle_types = [abs(int(getattr(child, "pdg_encoding", 0) or 0)) for child in children]
-
-    particle_strings = [getattr(child, "type_string", "") for child in children]
-    ic_hit = any(
-        (_has_signature(child, surface) != -1) and np.isfinite(getattr(child, "length", np.nan))
-        for child in children
+def _classify_bundle(primaries: List[dataclasses.I3Particle]) -> EventClass:
+    """Classify events with multiple detector primaries."""
+    all_muons = all(
+        abs(int(getattr(p, "pdg_encoding", 0) or 0)) in MUON_PDGS
+        for p in primaries
     )
-    ic_hit = True  # Reference implementation forces IC_hit True after computation
 
-    if (interaction_type == GLASHOW_INTERACTION and len(particle_types) == 1
-            and particle_strings[0] == 'Hadrons'):
-        return 7
+    if all_muons:
+        return EventClass.BUNDLE
+    else:
+        return EventClass.OTHER_MULTIPLE
 
-    if (11 in particle_types) or (interaction_type == NC_INTERACTION):
-        return 1 if ic_hit else 0
 
-    if 13 in particle_types:
-        mu_index = particle_types.index(13)
-        mu_particle = children[mu_index]
-        mu_signature = _has_signature(mu_particle, surface)
+def _classify_single_primary(primary: dataclasses.I3Particle,
+                             mc_tree: "dataclasses.I3MCTree",
+                             surface: phys_services.ExtrudedPolygon) -> EventClass:
+    """
+    Classify events with exactly one detector primary.
 
-        if not ic_hit:
-            return 11
-        elif interaction_type == GLASHOW_INTERACTION:
-            if mu_signature == 0:
-                return 8
-        elif mu_signature == 0:
-            return 3
-        elif mu_signature == 1:
-            return 2
-        elif mu_signature == 2:
-            return 4
-        elif mu_signature == -1:
-            return 11
-        return pclass
+    This is the most complex classification function, handling all neutrino
+    interaction types and track containment scenarios.
+    """
+    pdg = int(getattr(primary, "pdg_encoding", 0) or 0)
+    abs_pdg = abs(pdg)
+    children = _get_children(mc_tree, primary)
 
-    if 15 in particle_types:
-        tau_index = particle_types.index(15)
-        tau_particle = children[tau_index]
-        if not ic_hit:
-            return 12
-        elif interaction_type == GLASHOW_INTERACTION:
-            return 9
+    # Get child PDGs and types
+    child_pdgs = [abs(int(getattr(c, "pdg_encoding", 0) or 0)) for c in children]
+    child_types = [getattr(c, "type_string", "") for c in children]
 
-        tau_children = _get_children(mc_tree, tau_particle)
-        tau_child = tau_children[-1] if tau_children else None
-        tau_signature = _has_signature(tau_particle, surface)
+    # Check for hadrons in children
+    has_hadrons = any(t == "Hadrons" for t in child_types)
 
-        if tau_child is not None:
-            tau_child_pdg = abs(int(getattr(tau_child, "pdg_encoding", 0) or 0))
-            tau_child_sig = _has_signature(tau_child, surface)
-            if tau_child_pdg == 13:
-                if tau_child_sig == 0:
-                    return 3
-                if tau_child_sig == 1:
-                    return 2
-                if tau_child_sig == 2:
-                    return 4
+    # Helper to find specific particle in children
+    def find_child(pdg_set):
+        for c in children:
+            if abs(int(getattr(c, "pdg_encoding", 0) or 0)) in pdg_set:
+                return c
+        return None
+
+    # ===== ELECTRON NEUTRINO PRIMARY =====
+    if abs_pdg in ELECTRON_NEUTRINO_PDGS:
+        if has_hadrons:
+            # Check if there's an outgoing neutrino (NC) or electron (CC)
+            if any(abs(p) in ELECTRON_NEUTRINO_PDGS for p in child_pdgs):
+                return EventClass.HADR_CASCADE  # NC interaction
+            elif any(p in ELECTRON_PDGS for p in child_pdgs):
+                return EventClass.EM_HADR_CASCADE  # NuE CC
             else:
-                if tau_signature == 0 and tau_child_sig == 0:
-                    return 5
-                if tau_signature == 0 and tau_child_sig == -1:
-                    return 3
-                if tau_signature == 2 and tau_child_sig == 0:
-                    return 6
-                if tau_signature == 1:
-                    return 2
+                return EventClass.GLASHOW_HADR  # Glashow -> hadrons only
+        else:
+            # No hadrons - Glashow resonance W decay
+            if any(p in ELECTRON_PDGS for p in child_pdgs):
+                return EventClass.GLASHOW_ELECTRON
+            elif any(p in MUON_PDGS for p in child_pdgs):
+                muon = find_child(MUON_PDGS)
+                containment = _get_track_containment(muon, surface) if muon else "none"
+                if containment == "stopping":
+                    return EventClass.GLASHOW_CONTAINED_TRACK
+                else:
+                    return EventClass.GLASHOW_STARTING_TRACK
+            elif any(p in TAU_PDGS for p in child_pdgs):
+                tau = find_child(TAU_PDGS)
+                tau_containment = _get_track_containment(tau, surface) if tau else "none"
+                if tau_containment in ("throughgoing", "starting"):
+                    return EventClass.GLASHOW_STARTING_SPUR
+                else:
+                    # Tau decays inside - check decay products
+                    tau_children = _get_children(mc_tree, tau) if tau else []
+                    tau_child_pdgs = [abs(int(getattr(c, "pdg_encoding", 0) or 0)) for c in tau_children]
+                    tau_child_types = [getattr(c, "type_string", "") for c in tau_children]
 
-        if tau_signature == 0:
-            return 3
-        if tau_signature == 1:
-            return 2
-        if tau_signature == 2:
-            return 4
+                    if any(t == "Hadrons" for t in tau_child_types):
+                        return EventClass.GLASHOW_LOLLIPOP_HADR
+                    elif any(p in ELECTRON_PDGS for p in tau_child_pdgs):
+                        return EventClass.GLASHOW_LOLLIPOP_EM
+                    elif any(p in MUON_PDGS for p in tau_child_pdgs):
+                        mu_from_tau = next((c for c in tau_children if abs(int(getattr(c, "pdg_encoding", 0) or 0)) in MUON_PDGS), None)
+                        mu_containment = _get_track_containment(mu_from_tau, surface) if mu_from_tau else "none"
+                        if mu_containment == "stopping":
+                            return EventClass.GLASHOW_TAU_CONTAINED_TRACK
+                        else:
+                            return EventClass.GLASHOW_TAU_STARTING_TRACK
+            return EventClass.OTHER
 
-    return 100
+    # ===== MUON NEUTRINO PRIMARY =====
+    if abs_pdg in MUON_NEUTRINO_PDGS:
+        if has_hadrons:
+            if any(abs(p) in MUON_NEUTRINO_PDGS for p in child_pdgs):
+                return EventClass.HADR_CASCADE  # NC interaction
+            elif any(p in MUON_PDGS for p in child_pdgs):
+                muon = find_child(MUON_PDGS)
+                containment = _get_track_containment(muon, surface) if muon else "none"
+                if containment == "stopping":
+                    return EventClass.CONTAINED_TRACK
+                else:
+                    return EventClass.STARTING_TRACK
+        return EventClass.OTHER
+
+    # ===== TAU NEUTRINO PRIMARY =====
+    if abs_pdg in TAU_NEUTRINO_PDGS:
+        if has_hadrons:
+            if any(abs(p) in TAU_NEUTRINO_PDGS for p in child_pdgs):
+                return EventClass.HADR_CASCADE  # NC interaction
+            elif any(p in TAU_PDGS for p in child_pdgs):
+                tau = find_child(TAU_PDGS)
+                tau_containment = _get_track_containment(tau, surface) if tau else "none"
+                if tau_containment in ("throughgoing", "starting"):
+                    return EventClass.INVERTED_LOLLIPOP
+                else:
+                    # Tau decays inside - check decay products
+                    tau_children = _get_children(mc_tree, tau) if tau else []
+                    tau_child_pdgs = [abs(int(getattr(c, "pdg_encoding", 0) or 0)) for c in tau_children]
+                    tau_child_types = [getattr(c, "type_string", "") for c in tau_children]
+
+                    if any(t == "Hadrons" for t in tau_child_types):
+                        return EventClass.DOUBLE_BANG_HADR
+                    elif any(p in ELECTRON_PDGS for p in tau_child_pdgs):
+                        return EventClass.DOUBLE_BANG_EM
+                    elif any(p in MUON_PDGS for p in tau_child_pdgs):
+                        mu_from_tau = next((c for c in tau_children if abs(int(getattr(c, "pdg_encoding", 0) or 0)) in MUON_PDGS), None)
+                        mu_containment = _get_track_containment(mu_from_tau, surface) if mu_from_tau else "none"
+                        if mu_containment == "stopping":
+                            return EventClass.INVERTED_LOLLIPOP_CONTAINED_TRACK
+                        else:
+                            return EventClass.INVERTED_LOLLIPOP_STARTING_TRACK
+        return EventClass.OTHER
+
+    # ===== MUON PRIMARY (entering from outside) =====
+    if abs_pdg in MUON_PDGS:
+        containment = _get_track_containment(primary, surface)
+        if containment == "stopping":
+            return EventClass.STOPPING_TRACK
+        else:
+            return EventClass.THROUGHGOING_TRACK
+
+    # ===== TAU PRIMARY (entering from outside) =====
+    if abs_pdg in TAU_PDGS:
+        containment = _get_track_containment(primary, surface)
+        if containment in ("throughgoing", "starting"):
+            return EventClass.THROUGHGOING_SPUR
+        else:
+            # Tau decays inside - check decay products
+            tau_children = _get_children(mc_tree, primary)
+            tau_child_pdgs = [abs(int(getattr(c, "pdg_encoding", 0) or 0)) for c in tau_children]
+            tau_child_types = [getattr(c, "type_string", "") for c in tau_children]
+
+            if any(t == "Hadrons" for t in tau_child_types):
+                return EventClass.LOLLIPOP_HADR
+            elif any(p in ELECTRON_PDGS for p in tau_child_pdgs):
+                return EventClass.LOLLIPOP_EM
+            elif any(p in MUON_PDGS for p in tau_child_pdgs):
+                mu_from_tau = next((c for c in tau_children if abs(int(getattr(c, "pdg_encoding", 0) or 0)) in MUON_PDGS), None)
+                mu_containment = _get_track_containment(mu_from_tau, surface) if mu_from_tau else "none"
+                if mu_containment == "stopping":
+                    return EventClass.TAU_CONTAINED_TRACK
+                else:
+                    return EventClass.TAU_STARTING_TRACK
+
+    # ===== CASCADE PRIMARY (shouldn't normally be a detector primary) =====
+    if abs_pdg in CASCADE_PDGS:
+        return EventClass.UNCONTAINED_CASCADE
+
+    return EventClass.OTHER
 
 
 def compute_morphology_labels(frame: icetray.I3Frame,
                               mc_tree: Optional["dataclasses.I3MCTree"],
                               primary: Optional[dataclasses.I3Particle],
                               surface: Optional[phys_services.ExtrudedPolygon]) -> Tuple[int, int]:
-    """Return (classification_code, morphology_label) from MC truth."""
-    if frame is None:
-        return 100, CLASSIFICATION_TO_MORPHOLOGY.get(100, 5)
+    """
+    Return (event_class, morphology) using detector-primary approach.
 
-    interaction_type = _infer_interaction_type(frame)
-    if interaction_type == ATMOSPHERIC_INTERACTION and not frame.Has("I3MCWeightDict") and not frame.Has("EventProperties"):
-        pclass = _classify_corsika_event(mc_tree, surface)
+    This uses the I3EventLabeler approach: first identify particles that
+    actually intersect the detector ("detector primaries"), then classify
+    based on the number and type of primaries.
+    """
+    if mc_tree is None or surface is None:
+        return EventClass.OTHER, Morphology.UNCONTAINED
+
+    # Get detector primaries using I3EventLabeler approach
+    detector_primaries = _get_detector_primaries(mc_tree, surface)
+
+    if len(detector_primaries) == 0:
+        # No particles intersect detector - classify based on closest
+        closest = _get_closest_particle(mc_tree, surface)
+        event_class = _classify_uncontained(closest, mc_tree)
+    elif len(detector_primaries) == 1:
+        # Single primary - detailed classification
+        event_class = _classify_single_primary(detector_primaries[0], mc_tree, surface)
     else:
-        pclass = _classify_neutrino_event(mc_tree, primary, surface, interaction_type)
+        # Multiple primaries
+        event_class = _classify_bundle(detector_primaries)
 
-    morphology = CLASSIFICATION_TO_MORPHOLOGY.get(pclass, 5)
-    return pclass, morphology
+    morphology = DETAILED_TO_MORPHOLOGY.get(event_class, Morphology.UNCONTAINED)
+    return int(event_class), int(morphology)
 
 def find_i3_files(input_path: str) -> List[str]:
     """Find all i3 files (including .i3.zst) in the input directory."""
@@ -550,7 +796,7 @@ def parse_mc_truth(frame: icetray.I3Frame,
     if "Homogenized_QTot" in frame:
         parsed['homogenized_qtot'] = float(frame["Homogenized_QTot"].value)
 
-    parsed['starting'] = event_class in STARTING_CLASSIFICATIONS
+    # Note: 'starting' is now implicit in morphology (CASCADE=0 or STARTING_TRACK=1)
 
     return parsed
 
@@ -597,7 +843,7 @@ def convert_icecube_to_mmap(input_paths: Sequence[str], output_path: str,
     # Load geometry
     gcd_file = os.path.join(os.path.dirname(__file__), '..', 'resources', 'GeoCalibDetectorStatus_IC86.AVG_Pass2_SF0.99.i3')
     geometry = load_geometry(gcd_file)
-    detector_surface = phys_services.ExtrudedPolygon(geometry, 0.0)
+    detector_surface = phys_services.ExtrudedPolygon(geometry, 50.0)  # Match I3EventLabeler default padding
     
     print(f"Converting events from {len(i3_files)} files using streaming approach...")
 

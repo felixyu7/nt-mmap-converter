@@ -62,8 +62,8 @@ ICECUBE_EVENT_RECORD_DTYPE = np.dtype([
     ('initial_type', np.int32),
     ('event_class', np.int16),
     ('morphology', np.int8),
-    ('starting', np.bool_),
-    
+    # Note: 'starting' is now implicit in morphology (CASCADE=0 or STARTING_TRACK=1)
+
     # Final state arrays (2 particles: [0] lepton, [1] hadrons)
     ('final_energy', np.float32, (2,)),
     ('final_type', np.int32, (2,)),
@@ -114,7 +114,7 @@ class EventRecord:
         if source_type.lower() == 'icecube':
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
                              'initial_x', 'initial_y', 'initial_z', 'initial_type',
-                             'event_class', 'morphology', 'starting']
+                             'event_class', 'morphology']
         else:
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
                              'initial_x', 'initial_y', 'initial_z', 'bjorken_x',
