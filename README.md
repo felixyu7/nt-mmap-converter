@@ -105,25 +105,24 @@ val_events = events[indices[int(0.8*n):]]
 
 **IceCube Events (+ above):**
 - `homogenized_qtot` - Total charge (when available)
-- `event_class` - Detailed classification
-  - 0 outside cascade
-  - 1 contained cascade
-  - 2 through-going track
-  - 3 starting track
-  - 4 stopping track
-  - 5 double bang
-  - 6 stopping tau
-  - 7 Glashow cascade
-  - 8 Glashow track
-  - 9 Glashow tau
-  - 10 stop-start track (reserved)
-  - 11 passing track
-  - 12 uncontained tau
-  - 21 multiple coincident events
-  - 22 through-going bundle
-  - 23 stopping bundle
-  - 100/101 unknown
-- `morphology` - Simplified label (0=cascade, 1=through-going track, 2=starting track, 3=stopping track, 4=passing track, 5=bundle/other)
+- `event_class` - Detailed 34-class classification (matches `I3EventLabeler` from icetray ml_suite)
+  - 0-5: uncontained (background, cascade, skimming track/bundle/spur, other)
+  - 6-7: multiple primaries (bundle, other)
+  - 8: NC hadronic cascade
+  - 9: NuE CC electromagnetic + hadronic cascade
+  - 10-18: Glashow resonance variants
+  - 19-20: NuMu CC (starting/contained track)
+  - 21-25: NuTau CC (inverted lollipop, double bang, tau→muon)
+  - 26-27: entering muon (throughgoing/stopping track)
+  - 28-32: entering tau (throughgoing spur, lollipop, tau→muon)
+  - 33: other
+- `morphology` - Simplified 6-class label
+  - 0: cascade
+  - 1: starting track
+  - 2: throughgoing track
+  - 3: stopping track
+  - 4: uncontained
+  - 5: bundle
 - `final_*[0]` - Final state lepton, `final_*[1]` - Hadron shower
 
 **Photon Hits:**
