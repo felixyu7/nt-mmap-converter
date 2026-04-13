@@ -377,6 +377,19 @@ def parse_mc_truth(frame: icetray.I3Frame) -> Dict[str, Any]:
     parsed['event_class'] = event_class
     parsed['morphology'] = morphology
 
+    # Vertex position: use interaction vertex (first_vertex) for events where the
+    # detector primary is a neutrino (classes 8-25), otherwise use detector entry
+    # point (classes 0-7 uncontained/bundles, 26-32 muon/tau detector primaries).
+    labels = frame["EventLabels"] if "EventLabels" in frame else {}
+    if 8 <= event_class <= 25:
+        parsed['vertex_x'] = float(labels.get("first_vertex_x", 0.0))
+        parsed['vertex_y'] = float(labels.get("first_vertex_y", 0.0))
+        parsed['vertex_z'] = float(labels.get("first_vertex_z", 0.0))
+    else:
+        parsed['vertex_x'] = float(labels.get("detector_entry_x", 0.0))
+        parsed['vertex_y'] = float(labels.get("detector_entry_y", 0.0))
+        parsed['vertex_z'] = float(labels.get("detector_entry_z", 0.0))
+
     if final_lepton:
         final_energy[0] = final_lepton.energy
         final_type[0] = int(getattr(final_lepton, "pdg_encoding", 0) or 0)
