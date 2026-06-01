@@ -23,8 +23,10 @@ There is no `setup.py` / `pyproject.toml` — run `converter.py` directly from t
 
 **Dependencies**
 
-- **Prometheus conversion:** `numpy`, `pandas`, `pyarrow`
+- **Prometheus conversion:** `numpy`, `pandas`, `pyarrow`, `scipy`
 - **IceCube conversion:** `icetray >= 1.17` (with `ml_suite` built — provides `I3EventLabeler`) in addition to the above
+
+Prometheus events store a `vertex_x/y/z` following the same convention as the IceCube path: the neutrino interaction vertex when it lies inside the detector volume, otherwise the outgoing charged lepton's detector entry point. The detector volume is the convex hull of the DOM positions in `resources/icecube.geo` (used by default; override with the `geo_path` argument to `convert_prometheus_to_mmap`).
 
 The IceCube path is optional. `converter.py` auto-detects whether `icecube` imports and only exposes `--source icecube` if it does. For IceCube runs, activate your IceTray environment before invoking the converter (e.g. `/path/to/icetray/build/env-shell.sh`).
 

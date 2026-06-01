@@ -11,6 +11,15 @@ import numpy as np
 import pandas as pd
 
 from core.mmap_format import EventRecord, PhotonHit
+from core.geometry import DetectorVolume, unit_dir
+
+# Default detector geometry shipped with the repo (full IceCube DOM layout).
+DEFAULT_GEO_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'resources', 'icecube.geo'
+)
+
+# PDG codes of charged leptons whose trajectory defines the detector entry point.
+_CHARGED_LEPTONS = (11, 13, 15)
 
 def group_hits_by_window(hit_times, hit_charges, time_window, return_counts=False):
     """
@@ -146,6 +155,45 @@ def parse_mc_truth(mc_truth_dict: Dict[str, Any]) -> Dict[str, Any]:
             parsed[clean_field] = mc_truth_dict[field]
     
     return parsed
+
+
+def compute_vertex(mc: Dict[str, Any], detector: DetectorVolume) -> Tuple[float, float, float]:
+    """Compute the labeling vertex for a Prometheus event.
+
+    Follows the IceCube convention: use the neutrino interaction vertex when it
+    lies inside the detector volume, otherwise the outgoing charged lepton's
+    detector entry point (temporally first intersection of its trajectory with
+    the volume). Falls back to the interaction vertex when there is no charged
+    lepton (e.g. NC / cascade) or the lepton trajectory misses the detector;
+    such events typically fail the photon filters anyway.
+
+    Args:
+        mc: Parsed mc_truth dict (output of ``parse_mc_truth``).
+        detector: Detector volume used for containment / intersection tests.
+
+    Returns:
+        (vertex_x, vertex_y, vertex_z)
+    """
+    vertex = np.array([mc['initial_x'], mc['initial_y'], mc['initial_z']], dtype=np.float64)
+
+    if detector.contains(vertex):
+        return float(vertex[0]), float(vertex[1]), float(vertex[2])
+
+    # Vertex outside the detector: trace the primary charged lepton inward.
+    types = np.abs(np.asarray(mc.get('final_type', []), dtype=np.int64))
+    parents = np.asarray(mc.get('final_parent', []), dtype=np.int64)
+    if types.size and parents.size:
+        is_lepton = np.isin(types, _CHARGED_LEPTONS) & (parents == 0)
+        candidates = np.where(is_lepton)[0]
+        if candidates.size:
+            energies = np.asarray(mc['final_energy'], dtype=np.float64)
+            i = candidates[np.argmax(energies[candidates])]
+            direction = unit_dir(mc['final_zenith'][i], mc['final_azimuth'][i])
+            entry = detector.entry_point(vertex, direction)
+            if entry is not None:
+                return float(entry[0]), float(entry[1]), float(entry[2])
+
+    return float(vertex[0]), float(vertex[1]), float(vertex[2])
 
 
 def parse_photons(photons_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -315,7 +363,8 @@ def iter_prometheus_events(parquet_files: list) -> Iterator[Tuple[Dict[str, Any]
 def convert_prometheus_to_mmap(input_paths: Sequence[str], output_path: str,
                               file_range: str = None, grouping_window_ns: float = 0.0,
                               min_photons: int = None, max_photons: int = None,
-                              min_channels: int = None, max_channels: int = None) -> Tuple[int, int, int]:
+                              min_channels: int = None, max_channels: int = None,
+                              geo_path: str = DEFAULT_GEO_PATH) -> Tuple[int, int, int]:
     """
     Convert Prometheus parquet files to memory-mapped format using streaming approach.
     
@@ -328,7 +377,8 @@ def convert_prometheus_to_mmap(input_paths: Sequence[str], output_path: str,
         max_photons: Maximum photon hits allowed to keep an event (checked before grouping)
         min_channels: Minimum unique sensors required to keep an event (checked before grouping)
         max_channels: Maximum unique sensors allowed to keep an event (checked before grouping)
-        
+        geo_path: Path to the detector .geo file used for vertex labeling
+
     Returns:
         Tuple of (num_events_converted, total_photons, events_skipped)
     """
@@ -351,6 +401,14 @@ def convert_prometheus_to_mmap(input_paths: Sequence[str], output_path: str,
         parquet_files.extend(find_parquet_files(path))
 
     print(f"Found {len(parquet_files)} parquet files from {len(search_paths)} director{'y' if len(search_paths) == 1 else 'ies'}")
+
+    # Build the detector volume once for vertex labeling (reused for every event).
+    detector = None
+    if geo_path and os.path.isfile(geo_path):
+        detector = DetectorVolume.from_geo_file(geo_path)
+        print(f"Loaded detector geometry for vertex labeling from {geo_path}")
+    else:
+        print(f"WARNING: geometry file not found ({geo_path}); vertex fields will be zeroed")
     
     # Limit files if specified
     if file_range:
@@ -418,7 +476,12 @@ def convert_prometheus_to_mmap(input_paths: Sequence[str], output_path: str,
         sensor_string_pairs = np.column_stack([photons['string_id'], photons['sensor_id']])
         unique_channels = np.unique(sensor_string_pairs, axis=0)
         mc_truth['num_chans'] = len(unique_channels)
-        
+
+        # Compute the labeling vertex (interaction vertex or lepton entry point)
+        if detector is not None:
+            mc_truth['vertex_x'], mc_truth['vertex_y'], mc_truth['vertex_z'] = \
+                compute_vertex(mc_truth, detector)
+
         # Create event record using Prometheus-specific dtype
         event_record = EventRecord.from_dict(mc_truth, source_type='prometheus')
         

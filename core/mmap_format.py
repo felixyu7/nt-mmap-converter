@@ -28,7 +28,13 @@ PROMETHEUS_EVENT_RECORD_DTYPE = np.dtype([
     ('column_depth', np.float32),
     ('interaction', np.int32),
     ('initial_type', np.int32),
-    
+
+    # Vertex position: interaction vertex if it lies inside the detector volume,
+    # otherwise the lepton's detector entry point (see data/prometheus.compute_vertex)
+    ('vertex_x', np.float32),
+    ('vertex_y', np.float32),
+    ('vertex_z', np.float32),
+
     # Final state arrays (5 particles, zero-padded)
     ('final_energy', np.float32, (5,)),
     ('final_type', np.int32, (5,)),
@@ -125,7 +131,8 @@ class EventRecord:
         else:
             scalar_fields = ['initial_energy', 'initial_zenith', 'initial_azimuth',
                              'initial_x', 'initial_y', 'initial_z', 'bjorken_x',
-                             'bjorken_y', 'column_depth', 'interaction', 'initial_type']
+                             'bjorken_y', 'column_depth', 'interaction', 'initial_type',
+                             'vertex_x', 'vertex_y', 'vertex_z']
         
         for field in scalar_fields:
             if field in data:
